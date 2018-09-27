@@ -2,6 +2,7 @@ package daemon // import "github.com/docker/docker/daemon"
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -124,8 +125,8 @@ func (daemon *Daemon) SystemInfo() (*types.Info, error) {
 		ServerVersion:      dockerversion.Version,
 		ClusterStore:       daemon.configStore.ClusterStore,
 		ClusterAdvertise:   daemon.configStore.ClusterAdvertise,
-		HTTPProxy:          sockets.GetProxyEnv("http_proxy"),
-		HTTPSProxy:         sockets.GetProxyEnv("https_proxy"),
+		HTTPProxy:          maskCredentials(sockets.GetProxyEnv("http_proxy")),
+		HTTPSProxy:         maskCredentials(sockets.GetProxyEnv("https_proxy")),
 		NoProxy:            sockets.GetProxyEnv("no_proxy"),
 		LiveRestoreEnabled: daemon.configStore.LiveRestoreEnabled,
 		SecurityOptions:    securityOptions,
@@ -203,4 +204,14 @@ func (daemon *Daemon) showPluginsInfo() types.PluginsInfo {
 	pluginsInfo.Log = logger.ListDrivers()
 
 	return pluginsInfo
+}
+
+func maskCredentials(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.User == nil {
+		return rawURL
+	}
+	parsedURL.User = url.UserPassword("xxxxx", "xxxxx")
+	maskedURL := parsedURL.String()
+	return maskedURL
 }
