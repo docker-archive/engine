@@ -756,7 +756,7 @@ pipeline {
                         beforeAgent true
                         expression { params.arm64 }
                     }
-                    agent { label 'aarch64' }
+                    agent { label 'arm64 && linux' }
                     environment {
                         TEST_SKIP_INTEGRATION_CLI = '1'
                     }
