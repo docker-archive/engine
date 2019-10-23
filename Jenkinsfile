@@ -840,6 +840,7 @@ pipeline {
                     stages {
                         stage("Print info") {
                             steps {
+                                sh 'echo hello-world'
                                 sh 'docker version'
                                 sh 'docker info'
                             }
