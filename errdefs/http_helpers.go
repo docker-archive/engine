@@ -103,7 +103,10 @@ func FromStatusCode(err error, statusCode int) error {
 		logrus.WithFields(logrus.Fields{
 			"module":      "api",
 			"status_code": fmt.Sprintf("%d", statusCode),
-		}).Debugf("FIXME: Got an status-code for which error does not match any expected type!!!: %d", statusCode)
+			// to resolve the issue of https://mirantis.jira.com/browse/FIELD-2570, its confugsing for the following log info when Http response code is -1, its abnormal, 
+			// to make it more clear, revise the log info to indicate that its an error of http response
+		}).Debugf("FIXME: Got an status-code/Http response code for which error does not match any expected type!!!: %d", statusCode)
+		
 
 		switch {
 		case statusCode >= 200 && statusCode < 400:
