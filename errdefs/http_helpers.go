@@ -103,7 +103,7 @@ func FromStatusCode(err error, statusCode int) error {
 		logrus.WithFields(logrus.Fields{
 			"module":      "api",
 			"status_code": fmt.Sprintf("%d", statusCode),
-		}).Debugf("FIXME: Got an status-code for which error does not match any expected type!!!: %d", statusCode)
+		}).Debugf("FIXME: Got an status-code /abnormal HTTP response code for which error does not match any expected type!!!: %d", statusCode)
 
 		switch {
 		case statusCode >= 200 && statusCode < 400:
