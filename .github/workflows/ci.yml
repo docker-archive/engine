@@ -9,12 +9,12 @@ on:
 jobs:
   build:
   
-    strategy: &build-strategy
+    strategy:
       matrix:
         platform: [ linux/arm/v7 ]
         host: [ ubuntu-latest ]
 
-    env: &build-env
+    env:
       DOCKER_BUILDKIT: 1
       DOCKER_EXPERIMENTAL: 1
       DOCKER_GRAPHDRIVER: overlay2
