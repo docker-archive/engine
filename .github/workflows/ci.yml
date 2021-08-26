@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+  
+    strategy: &build-strategy
+      matrix:
+        platform: [ linux/arm/v7 ]
+        host: [ ubuntu-latest ]
+
+    env: &build-env
+      DOCKER_BUILDKIT: 1
+      DOCKER_EXPERIMENTAL: 1
+      DOCKER_GRAPHDRIVER: overlay2
+      APT_MIRROR: cdn-fastly.deb.debian.org
+      CHECK_CONFIG_COMMIT: 2b0755b936416834e14208c6c37b36977e67ea35
+      TESTDEBUG: 0
+      TIMEOUT: 120m
+      
+    runs-on: ${{ matrix.host }}
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Docker Setup QEMU
+      uses: docker/setup-qemu-action@v1.2.0
+      with:
+        image: tonistiigi/binfmt:latest
+        platforms: all
+    - name: Docker Version Info
+      run: |
+        docker version
+        docker info
+    - name: Docker Check Config
+      run: |
+        curl -fsSL -o "$GITHUB_WORKSPACE/check-config.sh" "https://raw.githubusercontent.com/moby/moby/${CHECK_CONFIG_COMMIT}/contrib/check-config.sh" \
+        && bash "${GITHUB_WORKSPACE}/check-config.sh"
+    - name: Build Development image
+      run: docker build --force-rm --build-arg APT_MIRROR --build-arg CROSS=true -t docker:"$GITHUB_SHA" ${GITHUB_WORKSPACE}
