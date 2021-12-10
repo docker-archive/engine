@@ -1,4 +1,3 @@
-//go:build !windows
 // +build !windows
 
 /*
@@ -23,7 +22,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -38,24 +36,6 @@ func HostDevices() ([]specs.LinuxDevice, error) {
 }
 
 func getDevices(path, containerPath string) ([]specs.LinuxDevice, error) {
-	// Only wildcard * is supported
-	if strings.HasSuffix(path, "*") {
-		if containerPath != "" {
-			return nil, errors.New("Wildcard device should not have container path")
-		}
-		var out []specs.LinuxDevice
-		devicePaths, _ := filepath.Glob(path)
-		var err error
-		var dev *specs.LinuxDevice
-		for _, devicePath := range devicePaths {
-			dev, err = deviceFromPath(devicePath)
-			if err != nil {
-				return nil, errors.Wrap(err, "error getting device from path")
-			}
-			out = append(out, *dev)
-		}
-		return out, err
-	}
 	stat, err := os.Stat(path)
 	if err != nil {
 		return nil, errors.Wrap(err, "error stating device path")
