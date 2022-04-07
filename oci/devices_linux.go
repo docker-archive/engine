@@ -38,6 +38,26 @@ func deviceCgroup(d *devices.Device) specs.LinuxDeviceCgroup {
 func DevicesFromPath(pathOnHost, pathInContainer, cgroupPermissions string) (devs []specs.LinuxDevice, devPermissions []specs.LinuxDeviceCgroup, err error) {
 	resolvedPathOnHost := pathOnHost
 
+	// Only wildcard * is supported
+	if strings.HasSuffix(resolvedPathOnHost, "*") {
+		devicePaths, _ := filepath.Glob(resolvedPathOnHost)
+		var err error
+		var dev *devices.Device
+		for _, devicePath := range devicePaths {
+			dev, err = devices.DeviceFromPath(devicePath, cgroupPermissions)
+			if err != nil {
+				return nil, nil, fmt.Errorf("no device %q %s", devicePath, err)
+			}
+			devs = append(devs, Device(dev))
+			devPermissions = append(devPermissions, deviceCgroup(dev))
+		}
+		if len(devs) > 0 {
+			return devs, devPermissions, nil
+		} else {
+			return devs, devPermissions, fmt.Errorf("error gathering device information while adding custom device %q: %s", pathOnHost, err)
+		}
+	}
+
 	// check if it is a symbolic link
 	if src, e := os.Lstat(pathOnHost); e == nil && src.Mode()&os.ModeSymlink == os.ModeSymlink {
 		if linkedPathOnHost, e := filepath.EvalSymlinks(pathOnHost); e == nil {
