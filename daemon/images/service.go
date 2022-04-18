@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/container"
 	daemonevents "github.com/docker/docker/daemon/events"
-	"github.com/docker/docker/distribution"
 	"github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
 	"github.com/docker/docker/image"
@@ -19,9 +18,8 @@ import (
 	dockerreference "github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
 	"github.com/docker/libtrust"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -54,9 +52,6 @@ type ImageServiceConfig struct {
 
 // NewImageService returns a new ImageService from a configuration
 func NewImageService(config ImageServiceConfig) *ImageService {
-	logrus.Debugf("Max Concurrent Downloads: %d", config.MaxConcurrentDownloads)
-	logrus.Debugf("Max Concurrent Uploads: %d", config.MaxConcurrentUploads)
-	logrus.Debugf("Max Download Attempts: %d", config.MaxDownloadAttempts)
 	return &ImageService{
 		containers:                config.ContainerStore,
 		distributionMetadataStore: config.DistributionMetadataStore,
@@ -95,7 +90,7 @@ type ImageService struct {
 
 // DistributionServices provides daemon image storage services
 type DistributionServices struct {
-	DownloadManager   distribution.RootFSDownloadManager
+	DownloadManager   *xfer.LayerDownloadManager
 	V2MetadataService metadata.V2MetadataService
 	LayerStore        layer.Store
 	ImageStore        image.Store
@@ -145,8 +140,6 @@ func (i *ImageService) CreateLayer(container *container.Container, initFunc laye
 		StorageOpt: container.HostConfig.StorageOpt,
 	}
 
-	// Indexing by OS is safe here as validation of OS has already been performed in create() (the only
-	// caller), and guaranteed non-nil
 	return i.layerStore.CreateRWLayer(container.ID, layerID, rwLayerOpts)
 }
 
@@ -171,10 +164,11 @@ func (i *ImageService) GetLayerMountID(cid string) (string, error) {
 
 // Cleanup resources before the process is shutdown.
 // called from daemon.go Daemon.Shutdown()
-func (i *ImageService) Cleanup() {
+func (i *ImageService) Cleanup() error {
 	if err := i.layerStore.Cleanup(); err != nil {
-		logrus.Errorf("Error during layer Store.Cleanup(): %v", err)
+		return errors.Wrap(err, "error during layerStore.Cleanup()")
 	}
+	return nil
 }
 
 // GraphDriverName returns the name of the graph drvier
@@ -187,7 +181,7 @@ func (i *ImageService) GraphDriverName() string {
 
 // ReleaseLayer releases a layer allowing it to be removed
 // called from delete.go Daemon.cleanupContainer(), and Daemon.containerExport()
-func (i *ImageService) ReleaseLayer(rwlayer layer.RWLayer, containerOS string) error {
+func (i *ImageService) ReleaseLayer(rwlayer layer.RWLayer) error {
 	metadata, err := i.layerStore.ReleaseRWLayer(rwlayer)
 	layer.LogReleaseMetadata(metadata)
 	if err != nil && !errors.Is(err, layer.ErrMountDoesNotExist) && !errors.Is(err, os.ErrNotExist) {
@@ -209,13 +203,9 @@ func (i *ImageService) LayerDiskUsage(ctx context.Context) (int64, error) {
 			case <-ctx.Done():
 				return allLayersSize, ctx.Err()
 			default:
-				size, err := l.DiffSize()
-				if err == nil {
-					if _, ok := layerRefs[l.ChainID()]; ok {
-						allLayersSize += size
-					}
-				} else {
-					logrus.Warnf("failed to get diff size for layer %v", l.ChainID())
+				size := l.DiffSize()
+				if _, ok := layerRefs[l.ChainID()]; ok {
+					allLayersSize += size
 				}
 			}
 		}

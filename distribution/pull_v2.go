@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/platforms"
@@ -28,10 +29,11 @@ import (
 	"github.com/docker/docker/pkg/system"
 	refstore "github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	archvariant "github.com/tonistiigi/go-archvariant"
 )
 
 var (
@@ -547,7 +549,7 @@ func (p *v2Puller) pullSchema1(ctx context.Context, ref reference.Reference, unv
 		descriptors = append(descriptors, layerDescriptor)
 	}
 
-	resultRootFS, release, err := p.config.DownloadManager.Download(ctx, *rootFS, runtime.GOOS, descriptors, p.config.ProgressOutput)
+	resultRootFS, release, err := p.config.DownloadManager.Download(ctx, *rootFS, descriptors, p.config.ProgressOutput)
 	if err != nil {
 		return "", "", err
 	}
@@ -665,6 +667,12 @@ func (p *v2Puller) pullSchema2Layers(ctx context.Context, target distribution.De
 		}
 	}
 
+	// Assume that the operating system is the host OS if blank, and validate it
+	// to ensure we don't cause a panic by an invalid index into the layerstores.
+	if layerStoreOS != "" && !system.IsOSSupported(layerStoreOS) {
+		return "", system.ErrNotSupportedOperatingSystem
+	}
+
 	if p.config.DownloadManager != nil {
 		go func() {
 			var (
@@ -672,7 +680,7 @@ func (p *v2Puller) pullSchema2Layers(ctx context.Context, target distribution.De
 				rootFS image.RootFS
 			)
 			downloadRootFS := *image.NewRootFS()
-			rootFS, release, err = p.config.DownloadManager.Download(ctx, downloadRootFS, layerStoreOS, descriptors, p.config.ProgressOutput)
+			rootFS, release, err = p.config.DownloadManager.Download(ctx, downloadRootFS, descriptors, p.config.ProgressOutput)
 			if err != nil {
 				// Intentionally do not cancel the config download here
 				// as the error from config download (if there is one)
@@ -850,9 +858,17 @@ func (p *v2Puller) pullManifestList(ctx context.Context, ref reference.Named, mf
 	return id, manifestListDigest, err
 }
 
+const (
+	defaultSchemaPullBackoff     = 250 * time.Millisecond
+	defaultMaxSchemaPullAttempts = 5
+)
+
 func (p *v2Puller) pullSchema2Config(ctx context.Context, dgst digest.Digest) (configJSON []byte, err error) {
 	blobs := p.repo.Blobs(ctx)
-	configJSON, err = blobs.Get(ctx, dgst)
+	err = retry(ctx, defaultMaxSchemaPullAttempts, defaultSchemaPullBackoff, func(ctx context.Context) (err error) {
+		configJSON, err = blobs.Get(ctx, dgst)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -869,6 +885,32 @@ func (p *v2Puller) pullSchema2Config(ctx context.Context, dgst digest.Digest) (c
 	}
 
 	return configJSON, nil
+}
+
+func retry(ctx context.Context, maxAttempts int, sleep time.Duration, f func(ctx context.Context) error) (err error) {
+	attempt := 0
+	for ; attempt < maxAttempts; attempt++ {
+		err = retryOnError(f(ctx))
+		if err == nil {
+			return nil
+		}
+		if xfer.IsDoNotRetryError(err) {
+			break
+		}
+
+		if attempt+1 < maxAttempts {
+			timer := time.NewTimer(sleep)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				logrus.WithError(err).WithField("attempts", attempt+1).Debug("retrying after error")
+				sleep *= 2
+			}
+		}
+	}
+	return errors.Wrapf(err, "download failed after attempts=%d", attempt+1)
 }
 
 // schema2ManifestDigest computes the manifest digest, and, if pulling by
@@ -985,4 +1027,13 @@ func toOCIPlatform(p manifestlist.PlatformSpec) specs.Platform {
 		OSFeatures:   p.OSFeatures,
 		OSVersion:    p.OSVersion,
 	}
+}
+
+// maximumSpec returns the distribution platform with maximum compatibility for the current node.
+func maximumSpec() specs.Platform {
+	p := platforms.DefaultSpec()
+	if p.Architecture == "amd64" {
+		p.Variant = archvariant.AMD64Variant()
+	}
+	return p
 }

@@ -22,6 +22,8 @@ import (
 	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
+	dconfig "github.com/docker/docker/daemon/config"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/cli/build"
 	"github.com/docker/docker/pkg/ioutils"
@@ -1441,7 +1443,7 @@ func (s *DockerSuite) TestPostContainersCreateShmSizeNegative(c *testing.T) {
 func (s *DockerSuite) TestPostContainersCreateShmSizeHostConfigOmitted(c *testing.T) {
 	// ShmSize is not supported on Windows
 	testRequires(c, DaemonIsLinux)
-	var defaultSHMSize int64 = 67108864
+
 	config := containertypes.Config{
 		Image: "busybox",
 		Cmd:   []string{"mount"},
@@ -1457,7 +1459,7 @@ func (s *DockerSuite) TestPostContainersCreateShmSizeHostConfigOmitted(c *testin
 	containerJSON, err := cli.ContainerInspect(context.Background(), container.ID)
 	assert.NilError(c, err)
 
-	assert.Equal(c, containerJSON.HostConfig.ShmSize, defaultSHMSize)
+	assert.Equal(c, containerJSON.HostConfig.ShmSize, dconfig.DefaultShmSize)
 
 	out, _ := dockerCmd(c, "start", "-i", containerJSON.ID)
 	shmRegexp := regexp.MustCompile(`shm on /dev/shm type tmpfs(.*)size=65536k`)
@@ -1589,7 +1591,7 @@ func (s *DockerSuite) TestContainerAPIDeleteWithEmptyName(c *testing.T) {
 	defer cli.Close()
 
 	err = cli.ContainerRemove(context.Background(), "", types.ContainerRemoveOptions{})
-	assert.ErrorContains(c, err, "No such container")
+	assert.Check(c, errdefs.IsNotFound(err))
 }
 
 func (s *DockerSuite) TestContainerAPIStatsWithNetworkDisabled(c *testing.T) {

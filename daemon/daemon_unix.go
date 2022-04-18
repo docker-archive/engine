@@ -302,25 +302,6 @@ func adjustParallelLimit(n int, limit int) int {
 	return softRlimit / overhead
 }
 
-func checkKernel() error {
-	// Check for unsupported kernel versions
-	// FIXME: it would be cleaner to not test for specific versions, but rather
-	// test for specific functionalities.
-	// Unfortunately we can't test for the feature "does not cause a kernel panic"
-	// without actually causing a kernel panic, so we need this workaround until
-	// the circumstances of pre-3.10 crashes are clearer.
-	// For details see https://github.com/docker/docker/issues/407
-	// Docker 1.11 and above doesn't actually run on kernels older than 3.4,
-	// due to containerd-shim usage of PR_SET_CHILD_SUBREAPER (introduced in 3.4).
-	if !kernel.CheckKernelVersion(3, 10, 0) {
-		v, _ := kernel.GetKernelVersion()
-		if os.Getenv("DOCKER_NOWARN_KERNEL_VERSION") == "" {
-			logrus.Fatalf("Your Linux kernel version %s is not supported for running docker. Please upgrade your kernel to 3.10.0 or newer.", v.String())
-		}
-	}
-	return nil
-}
-
 // adaptContainerSettings is called during container creation to modify any
 // settings necessary in the HostConfig structure.
 func (daemon *Daemon) adaptContainerSettings(hostConfig *containertypes.HostConfig, adjustCPUShares bool) error {
@@ -464,17 +445,16 @@ func verifyPlatformContainerResources(resources *containertypes.Resources, sysIn
 		// Kernel memory limit is not supported on cgroup v2.
 		// Even on cgroup v1, kernel memory limit (`kmem.limit_in_bytes`) has been deprecated since kernel 5.4.
 		// https://github.com/torvalds/linux/commit/0158115f702b0ba208ab0b5adf44cae99b3ebcc7
-		warnings = append(warnings, "Specifying a kernel memory limit is deprecated and will be removed in a future release.")
-	}
-	if resources.KernelMemory > 0 && !sysInfo.KernelMemory {
-		warnings = append(warnings, "Your kernel does not support kernel memory limit capabilities or the cgroup is not mounted. Limitation discarded.")
-		resources.KernelMemory = 0
-	}
-	if resources.KernelMemory > 0 && resources.KernelMemory < linuxMinMemory {
-		return warnings, fmt.Errorf("Minimum kernel memory limit allowed is 4MB")
-	}
-	if resources.KernelMemory > 0 && !kernel.CheckKernelVersion(4, 0, 0) {
-		warnings = append(warnings, "You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
+		if !sysInfo.KernelMemory {
+			warnings = append(warnings, "Your kernel does not support kernel memory limit capabilities or the cgroup is not mounted. Limitation discarded.")
+			resources.KernelMemory = 0
+		}
+		if resources.KernelMemory > 0 && resources.KernelMemory < linuxMinMemory {
+			return warnings, fmt.Errorf("Minimum kernel memory limit allowed is 6MB")
+		}
+		if !kernel.CheckKernelVersion(4, 0, 0) {
+			warnings = append(warnings, "You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
+		}
 	}
 	if resources.OomKillDisable != nil && !sysInfo.OomKillDisable {
 		// only produce warnings if the setting wasn't to *disable* the OOM Kill; no point
@@ -790,7 +770,7 @@ func verifyDaemonSettings(conf *config.Config) error {
 
 // checkSystem validates platform-specific requirements
 func checkSystem() error {
-	return checkKernel()
+	return nil
 }
 
 // configureMaxThreads sets the Go runtime max threads threshold
@@ -1082,7 +1062,7 @@ func removeDefaultBridgeInterface() {
 	}
 }
 
-func setupInitLayer(idMapping *idtools.IdentityMapping) func(containerfs.ContainerFS) error {
+func setupInitLayer(idMapping idtools.IdentityMapping) func(containerfs.ContainerFS) error {
 	return func(initPath containerfs.ContainerFS) error {
 		return initlayer.Setup(initPath, idMapping.RootPair())
 	}
@@ -1181,9 +1161,9 @@ func parseRemappedRoot(usergrp string) (string, string, error) {
 	return username, groupname, nil
 }
 
-func setupRemappedRoot(config *config.Config) (*idtools.IdentityMapping, error) {
+func setupRemappedRoot(config *config.Config) (idtools.IdentityMapping, error) {
 	if runtime.GOOS != "linux" && config.RemappedRoot != "" {
-		return nil, fmt.Errorf("User namespaces are only supported on Linux")
+		return idtools.IdentityMapping{}, fmt.Errorf("User namespaces are only supported on Linux")
 	}
 
 	// if the daemon was started with remapped root option, parse
@@ -1191,25 +1171,25 @@ func setupRemappedRoot(config *config.Config) (*idtools.IdentityMapping, error) 
 	if config.RemappedRoot != "" {
 		username, groupname, err := parseRemappedRoot(config.RemappedRoot)
 		if err != nil {
-			return nil, err
+			return idtools.IdentityMapping{}, err
 		}
 		if username == "root" {
 			// Cannot setup user namespaces with a 1-to-1 mapping; "--root=0:0" is a no-op
 			// effectively
 			logrus.Warn("User namespaces: root cannot be remapped with itself; user namespaces are OFF")
-			return &idtools.IdentityMapping{}, nil
+			return idtools.IdentityMapping{}, nil
 		}
 		logrus.Infof("User namespaces: ID ranges will be mapped to subuid/subgid ranges of: %s", username)
 		// update remapped root setting now that we have resolved them to actual names
 		config.RemappedRoot = fmt.Sprintf("%s:%s", username, groupname)
 
-		mappings, err := idtools.NewIdentityMapping(username)
+		mappings, err := idtools.LoadIdentityMapping(username)
 		if err != nil {
-			return nil, errors.Wrap(err, "Can't create ID mappings")
+			return idtools.IdentityMapping{}, errors.Wrap(err, "Can't create ID mappings")
 		}
 		return mappings, nil
 	}
-	return &idtools.IdentityMapping{}, nil
+	return idtools.IdentityMapping{}, nil
 }
 
 func setupDaemonRoot(config *config.Config, rootDir string, remappedRoot idtools.Identity) error {
@@ -1731,19 +1711,14 @@ func (daemon *Daemon) setupSeccompProfile() error {
 	return nil
 }
 
-// RawSysInfo returns *sysinfo.SysInfo .
-func (daemon *Daemon) RawSysInfo() *sysinfo.SysInfo {
+func (daemon *Daemon) loadSysInfo() {
 	var siOpts []sysinfo.Opt
 	if daemon.getCgroupDriver() == cgroupSystemdDriver {
 		if euid := os.Getenv("ROOTLESSKIT_PARENT_EUID"); euid != "" {
 			siOpts = append(siOpts, sysinfo.WithCgroup2GroupPath("/user.slice/user-"+euid+".slice"))
 		}
 	}
-	return sysinfo.New(siOpts...)
-}
-
-func recursiveUnmount(target string) error {
-	return mount.RecursiveUnmount(target)
+	daemon.sysInfo = sysinfo.New(siOpts...)
 }
 
 func (daemon *Daemon) initLibcontainerd(ctx context.Context) error {
@@ -1756,4 +1731,8 @@ func (daemon *Daemon) initLibcontainerd(ctx context.Context) error {
 		daemon,
 	)
 	return err
+}
+
+func recursiveUnmount(target string) error {
+	return mount.RecursiveUnmount(target)
 }

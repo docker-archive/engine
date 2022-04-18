@@ -1,6 +1,8 @@
 #!/bin/sh
 
-: "${ROOTLESSKIT_VERSION:=v0.14.6}"
+# When updating, also update rootlesskit commit in vendor.conf accordingly
+# v1.0.0
+: "${ROOTLESSKIT_VERSION:=1920341cd41e047834a21007424162a2dc946315}"
 
 install_rootlesskit() {
 	case "$1" in

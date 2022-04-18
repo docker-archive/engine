@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Microsoft/hcsshim/osversion"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/errdefs"
@@ -255,29 +254,12 @@ func (daemon *Daemon) createSpecWindowsFields(c *container.Container, s *specs.S
 		return err
 	}
 
-	// Do we have any assigned devices?
-	if len(c.HostConfig.Devices) > 0 {
-		if isHyperV {
-			return errors.New("device assignment is not supported for HyperV containers")
-		}
-		if osversion.Build() < osversion.RS5 {
-			return errors.New("device assignment requires Windows builds RS5 (17763+) or later")
-		}
-		for _, deviceMapping := range c.HostConfig.Devices {
-			srcParts := strings.SplitN(deviceMapping.PathOnHost, "/", 2)
-			if len(srcParts) != 2 {
-				return errors.New("invalid device assignment path")
-			}
-			if srcParts[0] != "class" {
-				return errors.Errorf("invalid device assignment type: '%s' should be 'class'", srcParts[0])
-			}
-			wd := specs.WindowsDevice{
-				ID:     srcParts[1],
-				IDType: srcParts[0],
-			}
-			s.Windows.Devices = append(s.Windows.Devices, wd)
-		}
+	devices, err := setupWindowsDevices(c.HostConfig.Devices)
+	if err != nil {
+		return err
 	}
+
+	s.Windows.Devices = append(s.Windows.Devices, devices...)
 
 	return nil
 }
@@ -468,4 +450,32 @@ func readCredentialSpecFile(id, root, location string) (string, error) {
 		return "", errors.Wrapf(err, "credential spec for container %s could not be read from file %q", id, full)
 	}
 	return string(bcontents[:]), nil
+}
+
+func setupWindowsDevices(devices []containertypes.DeviceMapping) (specDevices []specs.WindowsDevice, err error) {
+	if len(devices) == 0 {
+		return
+	}
+
+	for _, deviceMapping := range devices {
+		devicePath := deviceMapping.PathOnHost
+		if strings.HasPrefix(devicePath, "class/") {
+			devicePath = strings.Replace(devicePath, "class/", "class://", 1)
+		}
+
+		srcParts := strings.SplitN(devicePath, "://", 2)
+		if len(srcParts) != 2 {
+			return nil, errors.Errorf("invalid device assignment path: '%s', must be 'class/ID' or 'IDType://ID'", deviceMapping.PathOnHost)
+		}
+		if srcParts[0] == "" {
+			return nil, errors.Errorf("invalid device assignment path: '%s', IDType cannot be empty", deviceMapping.PathOnHost)
+		}
+		wd := specs.WindowsDevice{
+			ID:     srcParts[1],
+			IDType: srcParts[0],
+		}
+		specDevices = append(specDevices, wd)
+	}
+
+	return
 }

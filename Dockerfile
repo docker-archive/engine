@@ -2,8 +2,7 @@
 
 ARG CROSS="false"
 ARG SYSTEMD="false"
-# IMPORTANT: When updating this please note that stdlib archive/tar pkg is vendored
-ARG GO_VERSION=1.17.4
+ARG GO_VERSION=1.18.0
 ARG DEBIAN_FRONTEND=noninteractive
 ARG VPNKIT_VERSION=0.5.0
 ARG DOCKER_BUILDTAGS="apparmor seccomp"
@@ -37,7 +36,7 @@ WORKDIR /go/src/github.com/docker/distribution
 # the version specified here should match a current release.
 ARG REGISTRY_VERSION=v2.3.0
 
-# REGISTRY_VERSION_SCHEMA1 specifies the version of the regsitry to build and
+# REGISTRY_VERSION_SCHEMA1 specifies the version of the registry to build and
 # install from the https://github.com/docker/distribution repository. This is
 # an older (pre v2.3.0) version of the registry that only supports schema1
 # manifests. This version of the registry is not working on arm64, so installation
@@ -132,7 +131,7 @@ RUN --mount=type=cache,sharing=locked,id=moby-cross-false-aptlib,target=/var/lib
 FROM --platform=linux/amd64 runtime-dev-cross-false AS runtime-dev-cross-true
 ARG DEBIAN_FRONTEND
 # These crossbuild packages rely on gcc-<arch>, but this doesn't want to install
-# on non-amd64 systems, so other architectures cannnot crossbuild amd64.
+# on non-amd64 systems, so other architectures cannot crossbuild amd64.
 RUN --mount=type=cache,sharing=locked,id=moby-cross-true-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-cross-true-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install -y --no-install-recommends \
@@ -155,25 +154,12 @@ FROM base AS tomll
 # in CI in the hack/validate/toml script.
 #
 # When updating this version, consider updating the github.com/pelletier/go-toml
-# dependency in vendor.conf accordingly.
+# dependency in vendor.mod accordingly.
 ARG GOTOML_VERSION=v1.8.1
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "github.com/pelletier/go-toml/cmd/tomll@${GOTOML_VERSION}" \
      && /build/tomll --help
-
-FROM base AS vndr
-# VNDR_VERSION specifies the version of the vndr tool to build and install
-# from the https://github.com/LK4D4/vndr repository.
-#
-# The vndr tool is used to manage vendored go packages in the vendor directory,
-# and is pinned to a fixed version because different versions of this tool
-# can result in differences in the (go) files that are considered for vendoring.
-ARG VNDR_VERSION=v0.1.2
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-        GOBIN=/build/ GO111MODULE=on go install "github.com/LK4D4/vndr@${VNDR_VERSION}" \
-     && /build/vndr --help
 
 FROM dev-base AS containerd
 ARG DEBIAN_FRONTEND
@@ -188,7 +174,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
         PREFIX=/build /install.sh containerd
 
 FROM base AS golangci_lint
-ARG GOLANGCI_LINT_VERSION=v1.23.8
+ARG GOLANGCI_LINT_VERSION=v1.44.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
@@ -318,7 +304,6 @@ COPY --from=tomll         /build/ /usr/local/bin/
 COPY --from=tini          /build/ /usr/local/bin/
 COPY --from=registry      /build/ /usr/local/bin/
 COPY --from=criu          /build/ /usr/local/bin/
-COPY --from=vndr          /build/ /usr/local/bin/
 COPY --from=gotestsum     /build/ /usr/local/bin/
 COPY --from=golangci_lint /build/ /usr/local/bin/
 COPY --from=shfmt         /build/ /usr/local/bin/

@@ -15,7 +15,7 @@ import (
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/progress"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"gotest.tools/v3/assert"
 )
 
@@ -48,12 +48,12 @@ func (ml *mockLayer) Parent() layer.Layer {
 	return ml.parent
 }
 
-func (ml *mockLayer) Size() (size int64, err error) {
-	return 0, nil
+func (ml *mockLayer) Size() int64 {
+	return 0
 }
 
-func (ml *mockLayer) DiffSize() (size int64, err error) {
-	return 0, nil
+func (ml *mockLayer) DiffSize() int64 {
+	return 0
 }
 
 func (ml *mockLayer) Metadata() (map[string]string, error) {
@@ -293,7 +293,7 @@ func TestSuccessfulDownload(t *testing.T) {
 	}
 	firstDescriptor.diffID = l.DiffID()
 
-	rootFS, releaseFunc, err := ldm.Download(context.Background(), *image.NewRootFS(), runtime.GOOS, descriptors, progress.ChanOutput(progressChan))
+	rootFS, releaseFunc, err := ldm.Download(context.Background(), *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
 	if err != nil {
 		t.Fatalf("download error: %v", err)
 	}
@@ -348,8 +348,9 @@ func TestCancelledDownload(t *testing.T) {
 	}()
 
 	descriptors := downloadDescriptors(nil)
-	_, _, err := ldm.Download(ctx, *image.NewRootFS(), runtime.GOOS, descriptors, progress.ChanOutput(progressChan))
+	_, _, err := ldm.Download(ctx, *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
 	if err != context.Canceled {
+		close(progressChan)
 		t.Fatal("expected download to be cancelled")
 	}
 
@@ -412,7 +413,7 @@ func TestMaxDownloadAttempts(t *testing.T) {
 			descriptors := downloadDescriptors(&currentDownloads)
 			descriptors[4].(*mockDownloadDescriptor).simulateRetries = tc.simulateRetries
 
-			_, _, err := ldm.Download(context.Background(), *image.NewRootFS(), runtime.GOOS, descriptors, progress.ChanOutput(progressChan))
+			_, _, err := ldm.Download(context.Background(), *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
 			if tc.expectedErr == "" {
 				assert.NilError(t, err)
 			} else {

@@ -20,7 +20,6 @@ import (
 	"github.com/docker/docker/pkg/fsutils"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
-	"github.com/docker/docker/pkg/system"
 	"github.com/moby/locker"
 	"github.com/moby/sys/mount"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -51,9 +50,9 @@ type naiveDiffDriverWithApply struct {
 }
 
 // NaiveDiffDriverWithApply returns a NaiveDiff driver with custom ApplyDiff.
-func NaiveDiffDriverWithApply(driver ApplyDiffProtoDriver, uidMaps, gidMaps []idtools.IDMap) graphdriver.Driver {
+func NaiveDiffDriverWithApply(driver ApplyDiffProtoDriver, idMap idtools.IdentityMapping) graphdriver.Driver {
 	return &naiveDiffDriverWithApply{
-		Driver:    graphdriver.NewNaiveDiffDriver(driver, uidMaps, gidMaps),
+		Driver:    graphdriver.NewNaiveDiffDriver(driver, idMap),
 		applyDiff: driver,
 	}
 }
@@ -100,8 +99,7 @@ type overlayOptions struct{}
 // Driver contains information about the home directory and the list of active mounts that are created using this driver.
 type Driver struct {
 	home          string
-	uidMaps       []idtools.IDMap
-	gidMaps       []idtools.IDMap
+	idMap         idtools.IdentityMapping
 	ctr           *graphdriver.RefCounter
 	supportsDType bool
 	locker        *locker.Locker
@@ -116,7 +114,7 @@ func init() {
 // graphdriver.ErrNotSupported is returned.
 // If an overlay filesystem is not supported over an existing filesystem then
 // error graphdriver.ErrIncompatibleFS is returned.
-func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
+func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdriver.Driver, error) {
 	_, err := parseOptions(options)
 	if err != nil {
 		return nil, err
@@ -149,21 +147,13 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		return nil, err
 	}
 	if !supportsDType {
-		if !graphdriver.IsInitialized(home) {
-			return nil, overlayutils.ErrDTypeNotSupported("overlay", backingFs)
-		}
-		// allow running without d_type only for existing setups (#27443)
-		logrus.WithField("storage-driver", "overlay").Warn(overlayutils.ErrDTypeNotSupported("overlay", backingFs))
+		return nil, overlayutils.ErrDTypeNotSupported("overlay", backingFs)
 	}
 
 	currentID := idtools.CurrentIdentity()
-	_, rootGID, err := idtools.GetRootUIDGID(uidMaps, gidMaps)
-	if err != nil {
-		return nil, err
-	}
 	dirID := idtools.Identity{
 		UID: currentID.UID,
-		GID: rootGID,
+		GID: idMap.RootPair().GID,
 	}
 
 	// Create the driver home dir
@@ -172,14 +162,13 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 	}
 	d := &Driver{
 		home:          home,
-		uidMaps:       uidMaps,
-		gidMaps:       gidMaps,
+		idMap:         idMap,
 		ctr:           graphdriver.NewRefCounter(graphdriver.NewFsChecker(graphdriver.FsMagicOverlay)),
 		supportsDType: supportsDType,
 		locker:        locker.New(),
 	}
 
-	return NaiveDiffDriverWithApply(d, uidMaps, gidMaps), nil
+	return NaiveDiffDriverWithApply(d, d.idMap), nil
 }
 
 func parseOptions(options []string) (*overlayOptions, error) {
@@ -263,17 +252,12 @@ func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) (retErr
 	}
 
 	dir := d.dir(id)
-
-	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
-	if err != nil {
-		return err
-	}
-	root := idtools.Identity{UID: rootUID, GID: rootGID}
+	root := d.idMap.RootPair()
 
 	currentID := idtools.CurrentIdentity()
 	dirID := idtools.Identity{
 		UID: currentID.UID,
-		GID: rootGID,
+		GID: root.GID,
 	}
 	if err := idtools.MkdirAndChown(dir, 0710, dirID); err != nil {
 		return err
@@ -351,7 +335,7 @@ func (d *Driver) Remove(id string) error {
 	}
 	d.locker.Lock(id)
 	defer d.locker.Unlock(id)
-	return system.EnsureRemoveAll(d.dir(id))
+	return containerfs.EnsureRemoveAll(d.dir(id))
 }
 
 // Get creates and mounts the required file system for the given id and returns the mount path.
@@ -389,11 +373,8 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, err erro
 	if err != nil {
 		return nil, err
 	}
-	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
-	if err != nil {
-		return nil, err
-	}
-	if err := idtools.MkdirAndChown(mergedDir, 0700, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
+	root := d.idMap.RootPair()
+	if err := idtools.MkdirAndChown(mergedDir, 0700, root); err != nil {
 		return nil, err
 	}
 	var (
@@ -407,7 +388,7 @@ func (d *Driver) Get(id, mountLabel string) (_ containerfs.ContainerFS, err erro
 	}
 	// chown "workdir/work" to the remapped root UID/GID. Overlay fs inside a
 	// user namespace requires this to move a directory from lower to upper.
-	if err := os.Chown(path.Join(workDir, "work"), rootUID, rootGID); err != nil {
+	if err := root.Chown(path.Join(workDir, "work")); err != nil {
 		return nil, err
 	}
 	return containerfs.NewLocalContainerFS(mergedDir), nil
@@ -484,7 +465,7 @@ func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64
 		return 0, err
 	}
 
-	options := &archive.TarOptions{UIDMaps: d.uidMaps, GIDMaps: d.gidMaps}
+	options := &archive.TarOptions{IDMap: d.idMap}
 	if size, err = graphdriver.ApplyUncompressedLayer(tmpRootDir, diff, options); err != nil {
 		return 0, err
 	}

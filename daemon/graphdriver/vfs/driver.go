@@ -10,7 +10,6 @@ import (
 	"github.com/docker/docker/pkg/containerfs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
-	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/quota"
 	units "github.com/docker/go-units"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -28,23 +27,19 @@ func init() {
 
 // Init returns a new VFS driver.
 // This sets the home directory for the driver and returns NaiveDiffDriver.
-func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
+func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdriver.Driver, error) {
 	d := &Driver{
 		home:      home,
-		idMapping: idtools.NewIDMappingsFromMaps(uidMaps, gidMaps),
+		idMapping: idMap,
 	}
 
 	if err := d.parseOptions(options); err != nil {
 		return nil, err
 	}
-	_, rootGID, err := idtools.GetRootUIDGID(uidMaps, gidMaps)
-	if err != nil {
-		return nil, err
-	}
 
 	dirID := idtools.Identity{
 		UID: idtools.CurrentIdentity().UID,
-		GID: rootGID,
+		GID: d.idMapping.RootPair().GID,
 	}
 	if err := idtools.MkdirAllAndChown(home, 0710, dirID); err != nil {
 		return nil, err
@@ -56,7 +51,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		return nil, quota.ErrQuotaNotSupported
 	}
 
-	return graphdriver.NewNaiveDiffDriver(d, uidMaps, gidMaps), nil
+	return graphdriver.NewNaiveDiffDriver(d, d.idMapping), nil
 }
 
 // Driver holds information about the driver, home directory of the driver.
@@ -66,7 +61,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 type Driver struct {
 	driverQuota
 	home      string
-	idMapping *idtools.IdentityMapping
+	idMapping idtools.IdentityMapping
 }
 
 func (d *Driver) String() string {
@@ -186,7 +181,7 @@ func (d *Driver) dir(id string) string {
 
 // Remove deletes the content from the directory for a given id.
 func (d *Driver) Remove(id string) error {
-	return system.EnsureRemoveAll(d.dir(id))
+	return containerfs.EnsureRemoveAll(d.dir(id))
 }
 
 // Get returns the directory for the given id.

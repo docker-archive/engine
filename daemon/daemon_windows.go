@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker/pkg/containerfs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
+	"github.com/docker/docker/pkg/parsers/operatingsystem"
 	"github.com/docker/docker/pkg/platform"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
@@ -59,32 +60,16 @@ func getPluginExecRoot(root string) string {
 }
 
 func (daemon *Daemon) parseSecurityOpt(container *container.Container, hostConfig *containertypes.HostConfig) error {
-	return parseSecurityOpt(container, hostConfig)
-}
-
-func parseSecurityOpt(container *container.Container, config *containertypes.HostConfig) error {
 	return nil
 }
 
-func setupInitLayer(idMapping *idtools.IdentityMapping) func(containerfs.ContainerFS) error {
+func setupInitLayer(idMapping idtools.IdentityMapping) func(containerfs.ContainerFS) error {
 	return nil
-}
-
-func checkKernel() error {
-	return nil
-}
-
-func (daemon *Daemon) getCgroupDriver() string {
-	return ""
 }
 
 // adaptContainerSettings is called during container creation to modify any
 // settings necessary in the HostConfig structure.
 func (daemon *Daemon) adaptContainerSettings(hostConfig *containertypes.HostConfig, adjustCPUShares bool) error {
-	if hostConfig == nil {
-		return nil
-	}
-
 	return nil
 }
 
@@ -132,15 +117,6 @@ func verifyPlatformContainerResources(resources *containertypes.Resources, isHyp
 	// We don't set the lower limit here and it is up to the underlying platform (e.g., Windows) to return an error.
 	if resources.NanoCPUs < 0 || resources.NanoCPUs > int64(sysinfo.NumCPU())*1e9 {
 		return warnings, fmt.Errorf("range of CPUs is from 0.01 to %d.00, as there are only %d CPUs available", sysinfo.NumCPU(), sysinfo.NumCPU())
-	}
-
-	if resources.NanoCPUs > 0 && isHyperv && osversion.Build() < osversion.RS3 {
-		leftoverNanoCPUs := resources.NanoCPUs % 1e9
-		if leftoverNanoCPUs != 0 && resources.NanoCPUs > 1e9 {
-			resources.NanoCPUs = ((resources.NanoCPUs + 1e9/2) / 1e9) * 1e9
-			warningString := fmt.Sprintf("Your current OS version does not support Hyper-V containers with NanoCPUs greater than 1000000000 but not divisible by 1000000000. NanoCPUs rounded to %d", resources.NanoCPUs)
-			warnings = append(warnings, warningString)
-		}
 	}
 
 	if len(resources.BlkioDeviceReadBps) > 0 {
@@ -203,19 +179,7 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 	if hostConfig == nil {
 		return nil, nil
 	}
-	hyperv := daemon.runAsHyperVContainer(hostConfig)
-
-	// On RS5, we allow (but don't strictly support) process isolation on Client SKUs.
-	// Prior to RS5, we don't allow process isolation on Client SKUs.
-	// @engine maintainers. This block should not be removed. It partially enforces licensing
-	// restrictions on Windows. Ping Microsoft folks if there are concerns or PRs to change this.
-	if !hyperv && system.IsWindowsClient() && osversion.Build() < osversion.RS5 {
-		return warnings, fmt.Errorf("Windows client operating systems earlier than version 1809 can only run Hyper-V containers")
-	}
-
-	w, err := verifyPlatformContainerResources(&hostConfig.Resources, hyperv)
-	warnings = append(warnings, w...)
-	return warnings, err
+	return verifyPlatformContainerResources(&hostConfig.Resources, daemon.runAsHyperVContainer(hostConfig))
 }
 
 // verifyDaemonSettings performs validation of daemon config struct
@@ -227,11 +191,8 @@ func verifyDaemonSettings(config *config.Config) error {
 func checkSystem() error {
 	// Validate the OS version. Note that dockerd.exe must be manifested for this
 	// call to return the correct version.
-	if osversion.Get().MajorVersion < 10 {
-		return fmt.Errorf("This version of Windows does not support the docker daemon")
-	}
-	if osversion.Build() < osversion.RS1 {
-		return fmt.Errorf("The docker daemon requires build 14393 or later of Windows Server 2016 or Windows 10")
+	if osversion.Get().MajorVersion < 10 || osversion.Build() < osversion.RS5 {
+		return fmt.Errorf("this version of Windows does not support the docker daemon (Windows build %d or higher is required)", osversion.RS5)
 	}
 
 	vmcompute := windows.NewLazySystemDLL("vmcompute.dll")
@@ -476,8 +437,8 @@ func recursiveUnmount(_ string) error {
 	return nil
 }
 
-func setupRemappedRoot(config *config.Config) (*idtools.IdentityMapping, error) {
-	return &idtools.IdentityMapping{}, nil
+func setupRemappedRoot(config *config.Config) (idtools.IdentityMapping, error) {
+	return idtools.IdentityMapping{}, nil
 }
 
 func setupDaemonRoot(config *config.Config, rootDir string, rootIdentity idtools.Identity) error {
@@ -590,13 +551,13 @@ func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
 // setDefaultIsolation determine the default isolation mode for the
 // daemon to run in. This is only applicable on Windows
 func (daemon *Daemon) setDefaultIsolation() error {
-	daemon.defaultIsolation = containertypes.Isolation("process")
-
 	// On client SKUs, default to Hyper-V. @engine maintainers. This
 	// should not be removed. Ping Microsoft folks is there are PRs to
 	// to change this.
-	if system.IsWindowsClient() {
-		daemon.defaultIsolation = containertypes.Isolation("hyperv")
+	if operatingsystem.IsWindowsClient() {
+		daemon.defaultIsolation = containertypes.IsolationHyperV
+	} else {
+		daemon.defaultIsolation = containertypes.IsolationProcess
 	}
 	for _, option := range daemon.configStore.ExecOptions {
 		key, val, err := parsers.ParseKeyValueOpt(option)
@@ -611,16 +572,10 @@ func (daemon *Daemon) setDefaultIsolation() error {
 				return fmt.Errorf("Invalid exec-opt value for 'isolation':'%s'", val)
 			}
 			if containertypes.Isolation(val).IsHyperV() {
-				daemon.defaultIsolation = containertypes.Isolation("hyperv")
+				daemon.defaultIsolation = containertypes.IsolationHyperV
 			}
 			if containertypes.Isolation(val).IsProcess() {
-				if system.IsWindowsClient() && osversion.Build() < osversion.RS5 {
-					// On RS5, we allow (but don't strictly support) process isolation on Client SKUs.
-					// @engine maintainers. This block should not be removed. It partially enforces licensing
-					// restrictions on Windows. Ping Microsoft folks if there are concerns or PRs to change this.
-					return fmt.Errorf("Windows client operating systems earlier than version 1809 can only run Hyper-V containers")
-				}
-				daemon.defaultIsolation = containertypes.Isolation("process")
+				daemon.defaultIsolation = containertypes.IsolationProcess
 			}
 		default:
 			return fmt.Errorf("Unrecognised exec-opt '%s'\n", key)
@@ -643,16 +598,10 @@ func (daemon *Daemon) loadRuntimes() error {
 	return nil
 }
 
-func (daemon *Daemon) initRuntimes(_ map[string]types.Runtime) error {
-	return nil
-}
+func setupResolvConf(config *config.Config) {}
 
-func setupResolvConf(config *config.Config) {
-}
-
-// RawSysInfo returns *sysinfo.SysInfo .
-func (daemon *Daemon) RawSysInfo() *sysinfo.SysInfo {
-	return sysinfo.New()
+func (daemon *Daemon) loadSysInfo() {
+	daemon.sysInfo = sysinfo.New()
 }
 
 func (daemon *Daemon) initLibcontainerd(ctx context.Context) error {

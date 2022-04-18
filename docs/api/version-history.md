@@ -34,6 +34,42 @@ keywords: "API, Docker, rcli, REST, documentation"
   (`a disk usage operation is already running`) would be returned in this
   situation. This change is not versioned, and affects all API versions if the
   daemon has this patch.
+* The `POST /images/create` now supports both the operating system and architecture
+  that is passed through the `platform` query parameter when using the `fromSrc`
+  option to import an image from an archive. Previously, only the operating system
+  was used and the architecture was ignored. If no `platform` option is set, the
+  host's operating system and architecture as used as default. This change is not
+  versioned, and affects all API versions if the daemon has this patch.
+* The `POST /containers/{id}/wait` endpoint now returns a `400` status code if an
+  invalid `condition` is provided (on API 1.30 and up).
+* Removed the `KernelMemory` field from the `POST /containers/create` and
+  `POST /containers/{id}/update` endpoints, any value it is set to will be ignored
+  on API version `v1.42` and up. Older API versions still accept this field, but
+  may take no effect, depending on the kernel version and OCI runtime in use.
+* `GET /containers/{id}/json` now omits the `KernelMemory` and `KernelMemoryTCP`
+  if they are not set.
+* `GET /info` now omits the `KernelMemory` and `KernelMemoryTCP` if they are not
+  supported by the host or host's configuration (if cgroups v2 are in use).
+* `GET /_ping` and `HEAD /_ping` now return a `Swarm` header, which allows a
+  client to detect if Swarm is enabled on the daemon, without having to call
+  additional endpoints.
+  This change is not versioned, and affects all API versions if the daemon has
+  this patch. Clients must consider this header "optional", and fall back to
+  using other endpoints to get this information if the header is not present.
+
+  The `Swarm` header can contain one of the following values:
+
+    - "inactive"
+    - "pending"
+    - "error"
+    - "locked"
+    - "active/worker"
+    - "active/manager"
+* `POST /containers/create` for Windows containers now accepts a new syntax in
+  `HostConfig.Resources.Devices.PathOnHost`. As well as the existing `class/<GUID>`
+  syntax, `<IDType>://<ID>` is now recognised. Support for specific `<IDType>` values
+  depends on the underlying implementation and Windows version. This change is not
+  versioned, and affects all API versions if the daemon has this patch.
 
 ## v1.41 API changes
 
@@ -262,6 +298,7 @@ keywords: "API, Docker, rcli, REST, documentation"
 
 [Docker Engine API v1.32](https://docs.docker.com/engine/api/v1.32/) documentation
 
+* `POST /images/create` now accepts a `platform` parameter in the form of `os[/arch[/variant]]`.
 * `POST /containers/create` now accepts additional values for the
   `HostConfig.IpcMode` property. New values are `private`, `shareable`,
   and `none`.
@@ -376,6 +413,10 @@ keywords: "API, Docker, rcli, REST, documentation"
 * `GET /version` now returns `MinAPIVersion`.
 * `POST /build` accepts `networkmode` parameter to specify network used during build.
 * `GET /images/(name)/json` now returns `OsVersion` if populated
+* `GET /images/(name)/json` no longer contains the `RootFS.BaseLayer` field. This
+  field was used for Windows images that used a base-image that was pre-installed
+  on the host (`RootFS.Type` `layers+base`), which is no longer supported, and
+  the `RootFS.BaseLayer` field has been removed.
 * `GET /info` now returns `Isolation`.
 * `POST /containers/create` now takes `AutoRemove` in HostConfig, to enable auto-removal of the container on daemon side when the container's process exits.
 * `GET /containers/json` and `GET /containers/(id or name)/json` now return `"removing"` as a value for the `State.Status` field if the container is being removed. Previously, "exited" was returned as status.
@@ -499,6 +540,8 @@ keywords: "API, Docker, rcli, REST, documentation"
 
 [Docker Engine API v1.22](v1.22.md) documentation
 
+* The `HostConfig.LxcConf` field has been removed, and is no longer available on
+  `POST /containers/create` and `GET /containers/(id)/json`.
 * `POST /container/(name)/update` updates the resources of a container.
 * `GET /containers/json` supports filter `isolation` on Windows.
 * `GET /containers/json` now returns the list of networks of containers.

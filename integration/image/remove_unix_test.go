@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -50,10 +49,9 @@ func TestRemoveImageGarbageCollector(t *testing.T) {
 		MetadataStorePathTemplate: filepath.Join(d.RootDir(), "image", "%s", "layerdb"),
 		GraphDriver:               d.StorageDriver(),
 		GraphDriverOptions:        nil,
-		IDMapping:                 &idtools.IdentityMapping{},
+		IDMapping:                 idtools.IdentityMapping{},
 		PluginGetter:              nil,
 		ExperimentalEnabled:       false,
-		OS:                        runtime.GOOS,
 	})
 	i := images.NewImageService(images.ImageServiceConfig{
 		LayerStore: layerStore,

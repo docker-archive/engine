@@ -14,7 +14,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -29,7 +28,6 @@ import (
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
-	"github.com/docker/docker/daemon/discovery"
 	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/daemon/exec"
 	_ "github.com/docker/docker/daemon/graphdriver/register" // register graph drivers
@@ -49,6 +47,7 @@ import (
 	"github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/plugingetter"
+	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/truncindex"
 	"github.com/docker/docker/plugin"
@@ -58,6 +57,7 @@ import (
 	"github.com/docker/docker/runconfig"
 	volumesservice "github.com/docker/docker/volume/service"
 	"github.com/moby/buildkit/util/resolver"
+	resolverconfig "github.com/moby/buildkit/util/resolver/config"
 	"github.com/moby/locker"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -66,6 +66,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // ContainersNamespace is the name of the namespace used for users containers
@@ -79,7 +80,7 @@ var (
 
 // Daemon holds information about the Docker daemon.
 type Daemon struct {
-	ID                    string
+	id                    string
 	repository            string
 	containers            container.Store
 	containersReplica     container.ViewDB
@@ -89,16 +90,15 @@ type Daemon struct {
 	configStore           *config.Config
 	statsCollector        *stats.Collector
 	defaultLogConfig      containertypes.LogConfig
-	RegistryService       registry.Service
+	registryService       registry.Service
 	EventsService         *events.Events
 	netController         libnetwork.NetworkController
 	volumes               *volumesservice.VolumesService
-	discoveryWatcher      discovery.Reloader
 	root                  string
-	seccompEnabled        bool
-	apparmorEnabled       bool
+	sysInfoOnce           sync.Once
+	sysInfo               *sysinfo.SysInfo
 	shutdown              bool
-	idMapping             *idtools.IdentityMapping
+	idMapping             idtools.IdentityMapping
 	graphDriver           string        // TODO: move graphDriver field to an InfoService
 	PluginStore           *plugin.Store // TODO: remove
 	pluginManager         *plugin.Manager
@@ -156,7 +156,7 @@ func (daemon *Daemon) RegistryHosts() docker.RegistryHosts {
 	var (
 		registryKey = "docker.io"
 		mirrors     = make([]string, len(daemon.configStore.Mirrors))
-		m           = map[string]resolver.RegistryConfig{}
+		m           = map[string]resolverconfig.RegistryConfig{}
 	)
 	// must trim "https://" or "http://" prefix
 	for i, v := range daemon.configStore.Mirrors {
@@ -166,11 +166,11 @@ func (daemon *Daemon) RegistryHosts() docker.RegistryHosts {
 		mirrors[i] = v
 	}
 	// set mirrors for default registry
-	m[registryKey] = resolver.RegistryConfig{Mirrors: mirrors}
+	m[registryKey] = resolverconfig.RegistryConfig{Mirrors: mirrors}
 
 	for _, v := range daemon.configStore.InsecureRegistries {
 		u, err := url.Parse(v)
-		c := resolver.RegistryConfig{}
+		c := resolverconfig.RegistryConfig{}
 		if err == nil {
 			v = u.Host
 			t := true
@@ -184,17 +184,15 @@ func (daemon *Daemon) RegistryHosts() docker.RegistryHosts {
 	}
 
 	for k, v := range m {
-		if d, err := registry.HostCertsDir(k); err == nil {
-			v.TLSConfigDir = []string{d}
-			m[k] = v
-		}
+		v.TLSConfigDir = []string{registry.HostCertsDir(k)}
+		m[k] = v
 	}
 
 	certsDir := registry.CertsDir()
 	if fis, err := os.ReadDir(certsDir); err == nil {
 		for _, fi := range fis {
 			if _, ok := m[fi.Name()]; !ok {
-				m[fi.Name()] = resolver.RegistryConfig{
+				m[fi.Name()] = resolverconfig.RegistryConfig{
 					TLSConfigDir: []string{filepath.Join(certsDir, fi.Name())},
 				}
 			}
@@ -523,8 +521,6 @@ func (daemon *Daemon) restore() error {
 				}
 			}
 
-			// Make sure networks are available before starting
-			daemon.waitForNetworks(c)
 			if err := daemon.containerStart(c, "", "", true); err != nil {
 				log.WithError(err).Error("failed to start container")
 			}
@@ -627,40 +623,6 @@ func (daemon *Daemon) RestartSwarmContainers() {
 		}
 	}
 	group.Wait()
-}
-
-// waitForNetworks is used during daemon initialization when starting up containers
-// It ensures that all of a container's networks are available before the daemon tries to start the container.
-// In practice it just makes sure the discovery service is available for containers which use a network that require discovery.
-func (daemon *Daemon) waitForNetworks(c *container.Container) {
-	if daemon.discoveryWatcher == nil {
-		return
-	}
-
-	// Make sure if the container has a network that requires discovery that the discovery service is available before starting
-	for netName := range c.NetworkSettings.Networks {
-		// If we get `ErrNoSuchNetwork` here, we can assume that it is due to discovery not being ready
-		// Most likely this is because the K/V store used for discovery is in a container and needs to be started
-		if _, err := daemon.netController.NetworkByName(netName); err != nil {
-			if _, ok := err.(libnetwork.ErrNoSuchNetwork); !ok {
-				continue
-			}
-
-			// use a longish timeout here due to some slowdowns in libnetwork if the k/v store is on anything other than --net=host
-			// FIXME: why is this slow???
-			dur := 60 * time.Second
-			timer := time.NewTimer(dur)
-
-			logrus.WithField("container", c.ID).Debugf("Container %s waiting for network to be ready", c.Name)
-			select {
-			case <-daemon.discoveryWatcher.ReadyCh():
-			case <-timer.C:
-			}
-			timer.Stop()
-
-			return
-		}
-	}
 }
 
 func (daemon *Daemon) children(c *container.Container) map[string]*container.Container {
@@ -890,7 +852,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		}
 	}
 
-	d.RegistryService = registryService
+	d.registryService = registryService
 	logger.RegisterPluginGetter(d.PluginStore)
 
 	metricsSockPath, err := d.listenMetricsSock()
@@ -923,7 +885,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		// It is not harm to add WithBlock for containerd connection.
 		grpc.WithBlock(),
 
-		grpc.WithInsecure(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithConnectParams(connParams),
 		grpc.WithContextDialer(dialer.ContextDialer),
 
@@ -987,7 +949,6 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		IDMapping:                 idMapping,
 		PluginGetter:              d.PluginStore,
 		ExperimentalEnabled:       config.Experimental,
-		OS:                        runtime.GOOS,
 	})
 	if err != nil {
 		return nil, err
@@ -1050,12 +1011,6 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		return nil, err
 	}
 
-	// Discovery is only enabled when the daemon is launched with an address to advertise.  When
-	// initialized, the daemon is registered and we can store the discovery backend as it's read-only
-	if err := d.initDiscovery(config); err != nil {
-		return nil, err
-	}
-
 	sysInfo := d.RawSysInfo()
 	for _, w := range sysInfo.Warnings {
 		logrus.Warn(w)
@@ -1066,7 +1021,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		return nil, errors.New("Devices cgroup isn't mounted")
 	}
 
-	d.ID = trustKey.PublicKey().KeyID()
+	d.id = trustKey.PublicKey().KeyID()
 	d.repository = daemonRepo
 	d.containers = container.NewMemoryStore()
 	if d.containersReplica, err = container.NewViewDB(); err != nil {
@@ -1079,8 +1034,6 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	d.EventsService = events.New()
 	d.root = config.Root
 	d.idMapping = idMapping
-	d.seccompEnabled = sysInfo.Seccomp
-	d.apparmorEnabled = sysInfo.AppArmor
 
 	d.linkIndex = newLinkIndex()
 
@@ -1118,6 +1071,9 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// used above to run migration. They could be initialized in ImageService
 	// if migration is called from daemon/images. layerStore might move as well.
 	d.imageService = images.NewImageService(imgSvcConfig)
+	logrus.Debugf("Max Concurrent Downloads: %d", imgSvcConfig.MaxConcurrentDownloads)
+	logrus.Debugf("Max Concurrent Uploads: %d", imgSvcConfig.MaxConcurrentUploads)
+	logrus.Debugf("Max Download Attempts: %d", imgSvcConfig.MaxDownloadAttempts)
 
 	go d.execCommandGC()
 
@@ -1249,7 +1205,9 @@ func (daemon *Daemon) Shutdown() error {
 	}
 
 	if daemon.imageService != nil {
-		daemon.imageService.Cleanup()
+		if err := daemon.imageService.Cleanup(); err != nil {
+			logrus.Error(err)
+		}
 	}
 
 	// If we are part of a cluster, clean up cluster's stuff
@@ -1390,26 +1348,6 @@ func (daemon *Daemon) IsShuttingDown() bool {
 	return daemon.shutdown
 }
 
-// initDiscovery initializes the discovery watcher for this daemon.
-func (daemon *Daemon) initDiscovery(conf *config.Config) error {
-	advertise, err := config.ParseClusterAdvertiseSettings(conf.ClusterStore, conf.ClusterAdvertise)
-	if err != nil {
-		if err == discovery.ErrDiscoveryDisabled {
-			return nil
-		}
-		return err
-	}
-
-	conf.ClusterAdvertise = advertise
-	discoveryWatcher, err := discovery.Init(conf.ClusterStore, conf.ClusterAdvertise, conf.ClusterOpts)
-	if err != nil {
-		return fmt.Errorf("discovery initialization failed (%v)", err)
-	}
-
-	daemon.discoveryWatcher = discoveryWatcher
-	return nil
-}
-
 func isBridgeNetworkDisabled(conf *config.Config) bool {
 	return conf.BridgeConfig.Iface == config.DisableNetworkBridge
 }
@@ -1428,27 +1366,6 @@ func (daemon *Daemon) networkOptions(dconfig *config.Config, pg plugingetter.Plu
 	dn := runconfig.DefaultDaemonNetworkMode().NetworkName()
 	options = append(options, nwconfig.OptionDefaultDriver(string(dd)))
 	options = append(options, nwconfig.OptionDefaultNetwork(dn))
-
-	if strings.TrimSpace(dconfig.ClusterStore) != "" {
-		kv := strings.Split(dconfig.ClusterStore, "://")
-		if len(kv) != 2 {
-			return nil, errors.New("kv store daemon config must be of the form KV-PROVIDER://KV-URL")
-		}
-		options = append(options, nwconfig.OptionKVProvider(kv[0]))
-		options = append(options, nwconfig.OptionKVProviderURL(kv[1]))
-	}
-	if len(dconfig.ClusterOpts) > 0 {
-		options = append(options, nwconfig.OptionKVOpts(dconfig.ClusterOpts))
-	}
-
-	if daemon.discoveryWatcher != nil {
-		options = append(options, nwconfig.OptionDiscoveryWatcher(daemon.discoveryWatcher))
-	}
-
-	if dconfig.ClusterAdvertise != "" {
-		options = append(options, nwconfig.OptionDiscoveryAddress(dconfig.ClusterAdvertise))
-	}
-
 	options = append(options, nwconfig.OptionLabels(dconfig.Labels))
 	options = append(options, driverOptions(dconfig))
 
@@ -1542,7 +1459,7 @@ func (daemon *Daemon) GetAttachmentStore() *network.AttachmentStore {
 }
 
 // IdentityMapping returns uid/gid mapping or a SID (in the case of Windows) for the builder
-func (daemon *Daemon) IdentityMapping() *idtools.IdentityMapping {
+func (daemon *Daemon) IdentityMapping() idtools.IdentityMapping {
 	return daemon.idMapping
 }
 
@@ -1557,4 +1474,17 @@ func (daemon *Daemon) BuilderBackend() builder.Backend {
 		*Daemon
 		*images.ImageService
 	}{daemon, daemon.imageService}
+}
+
+// RawSysInfo returns *sysinfo.SysInfo .
+func (daemon *Daemon) RawSysInfo() *sysinfo.SysInfo {
+	daemon.sysInfoOnce.Do(func() {
+		// We check if sysInfo is not set here, to allow some test to
+		// override the actual sysInfo.
+		if daemon.sysInfo == nil {
+			daemon.loadSysInfo()
+		}
+	})
+
+	return daemon.sysInfo
 }

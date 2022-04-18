@@ -31,7 +31,6 @@ import (
 	"github.com/docker/docker/pkg/containerfs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
-	"github.com/docker/docker/pkg/system"
 	units "github.com/docker/go-units"
 	"github.com/moby/sys/mount"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -51,7 +50,7 @@ type btrfsOptions struct {
 
 // Init returns a new BTRFS driver.
 // An error is returned if BTRFS is not supported.
-func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
+func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdriver.Driver, error) {
 
 	// Perform feature detection on /var/lib/docker/btrfs if it's an existing directory.
 	// This covers situations where /var/lib/docker/btrfs is a mount, and on a different
@@ -71,11 +70,10 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		return nil, graphdriver.ErrPrerequisites
 	}
 
-	remappedRoot := idtools.NewIDMappingsFromMaps(uidMaps, gidMaps)
 	currentID := idtools.CurrentIdentity()
 	dirID := idtools.Identity{
 		UID: currentID.UID,
-		GID: remappedRoot.RootPair().GID,
+		GID: idMap.RootPair().GID,
 	}
 
 	if err := idtools.MkdirAllAndChown(home, 0710, dirID); err != nil {
@@ -98,8 +96,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 
 	driver := &Driver{
 		home:    home,
-		uidMaps: uidMaps,
-		gidMaps: gidMaps,
+		idMap:   idMap,
 		options: opt,
 	}
 
@@ -109,7 +106,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		}
 	}
 
-	return graphdriver.NewNaiveDiffDriver(driver, uidMaps, gidMaps), nil
+	return graphdriver.NewNaiveDiffDriver(driver, driver.idMap), nil
 }
 
 func parseOptions(opt []string) (btrfsOptions, bool, error) {
@@ -140,8 +137,7 @@ func parseOptions(opt []string) (btrfsOptions, bool, error) {
 type Driver struct {
 	// root of the file system
 	home         string
-	uidMaps      []idtools.IDMap
-	gidMaps      []idtools.IDMap
+	idMap        idtools.IdentityMapping
 	options      btrfsOptions
 	quotaEnabled bool
 	once         sync.Once
@@ -491,15 +487,12 @@ func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts
 func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) error {
 	quotas := path.Join(d.home, "quotas")
 	subvolumes := path.Join(d.home, "subvolumes")
-	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
-	if err != nil {
-		return err
-	}
+	root := d.idMap.RootPair()
 
 	currentID := idtools.CurrentIdentity()
 	dirID := idtools.Identity{
 		UID: currentID.UID,
-		GID: rootGID,
+		GID: root.GID,
 	}
 
 	if err := idtools.MkdirAllAndChown(subvolumes, 0710, dirID); err != nil {
@@ -547,8 +540,8 @@ func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) error {
 
 	// if we have a remapped root (user namespaces enabled), change the created snapshot
 	// dir ownership to match
-	if rootUID != 0 || rootGID != 0 {
-		if err := os.Chown(path.Join(subvolumes, id), rootUID, rootGID); err != nil {
+	if root.UID != 0 || root.GID != 0 {
+		if err := root.Chown(path.Join(subvolumes, id)); err != nil {
 			return err
 		}
 	}
@@ -627,7 +620,7 @@ func (d *Driver) Remove(id string) error {
 		//
 		// From https://github.com/containers/storage/pull/508/commits/831e32b6bdcb530acc4c1cb9059d3c6dba14208c
 	}
-	if err := system.EnsureRemoveAll(dir); err != nil {
+	if err := containerfs.EnsureRemoveAll(dir); err != nil {
 		return err
 	}
 	return d.subvolRescanQuota()

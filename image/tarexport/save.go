@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/docker/distribution"
@@ -17,7 +16,7 @@ import (
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/system"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
 
@@ -149,17 +148,13 @@ func (l *tarexporter) takeLayerReference(id image.ID, imgDescr *imageDescriptor)
 	if err != nil {
 		return err
 	}
+	if os := img.OperatingSystem(); !system.IsOSSupported(os) {
+		return fmt.Errorf("os %q is not supported", os)
+	}
 	imgDescr.image = img
 	topLayerID := img.RootFS.ChainID()
 	if topLayerID == "" {
 		return nil
-	}
-	os := img.OS
-	if os == "" {
-		os = runtime.GOOS
-	}
-	if !system.IsOSSupported(os) {
-		return fmt.Errorf("os %q is not supported", os)
 	}
 	layer, err := l.lss.Get(topLayerID)
 	if err != nil {

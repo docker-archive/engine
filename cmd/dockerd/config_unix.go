@@ -5,10 +5,13 @@ package main
 
 import (
 	"os/exec"
+	"path/filepath"
 
 	"github.com/containerd/cgroups"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/opts"
+	"github.com/docker/docker/pkg/homedir"
+	"github.com/docker/docker/registry"
 	"github.com/docker/docker/rootless"
 	units "github.com/docker/go-units"
 	"github.com/pkg/errors"
@@ -35,7 +38,7 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.BoolVar(&conf.EnableSelinuxSupport, "selinux-enabled", false, "Enable selinux support")
 	flags.Var(opts.NewNamedUlimitOpt("default-ulimits", &conf.Ulimits), "default-ulimit", "Default ulimits for containers")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPTables, "iptables", true, "Enable addition of iptables rules")
-	flags.BoolVar(&conf.BridgeConfig.EnableIP6Tables, "ip6tables", false, "Enable addition of ip6tables rules")
+	flags.BoolVar(&conf.BridgeConfig.EnableIP6Tables, "ip6tables", false, "Enable addition of ip6tables rules (experimental)")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPForward, "ip-forward", true, "Enable net.ipv4.ip_forward")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPMasq, "ip-masq", true, "Enable IP masquerading")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPv6, "ipv6", false, "Enable IPv6 networking")
@@ -49,6 +52,11 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 		if err != nil {
 			return errors.Wrapf(err, "running with RootlessKit, but %s not installed", rootless.RootlessKitDockerProxyBinary)
 		}
+
+		configHome, err := homedir.GetConfigHome()
+		if err == nil {
+			registry.SetCertsDir(filepath.Join(configHome, "docker/certs.d"))
+		}
 	}
 	flags.StringVar(&conf.BridgeConfig.UserlandProxyPath, "userland-proxy-path", defaultUserlandProxyPath, "Path to the userland proxy binary")
 	flags.StringVar(&conf.CgroupParent, "cgroup-parent", "", "Set parent cgroup for all containers")
@@ -57,8 +65,8 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.IntVar(&conf.OOMScoreAdjust, "oom-score-adjust", 0, "Set the oom_score_adj for the daemon")
 	flags.BoolVar(&conf.Init, "init", false, "Run an init in the container to forward signals and reap processes")
 	flags.StringVar(&conf.InitPath, "init-path", "", "Path to the docker-init binary")
-	flags.Int64Var(&conf.CPURealtimePeriod, "cpu-rt-period", 0, "Limit the CPU real-time period in microseconds for the parent cgroup for all containers")
-	flags.Int64Var(&conf.CPURealtimeRuntime, "cpu-rt-runtime", 0, "Limit the CPU real-time runtime in microseconds for the parent cgroup for all containers")
+	flags.Int64Var(&conf.CPURealtimePeriod, "cpu-rt-period", 0, "Limit the CPU real-time period in microseconds for the parent cgroup for all containers (not supported with cgroups v2)")
+	flags.Int64Var(&conf.CPURealtimeRuntime, "cpu-rt-runtime", 0, "Limit the CPU real-time runtime in microseconds for the parent cgroup for all containers (not supported with cgroups v2)")
 	flags.StringVar(&conf.SeccompProfile, "seccomp-profile", config.SeccompProfileDefault, `Path to seccomp profile. Use "unconfined" to disable the default seccomp profile`)
 	flags.Var(&conf.ShmSize, "default-shm-size", "Default shm size for containers")
 	flags.BoolVar(&conf.NoNewPrivileges, "no-new-privileges", false, "Set no-new-privileges by default for new containers")
@@ -73,4 +81,15 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	}
 	flags.StringVar(&conf.CgroupNamespaceMode, "default-cgroupns-mode", string(defaultCgroupNamespaceMode), `Default mode for containers cgroup namespace ("host" | "private")`)
 	return nil
+}
+
+// configureCertsDir configures registry.CertsDir() depending on if the daemon
+// is running in rootless mode or not.
+func configureCertsDir() {
+	if rootless.RunningWithRootlessKit() {
+		configHome, err := homedir.GetConfigHome()
+		if err == nil {
+			registry.SetCertsDir(filepath.Join(configHome, "docker/certs.d"))
+		}
+	}
 }

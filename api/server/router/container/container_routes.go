@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/containerd/containerd/platforms"
+	"github.com/docker/docker/api/server/httpstatus"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
@@ -336,12 +337,16 @@ func (s *containerRouter) postContainersWait(ctx context.Context, w http.Respons
 		if err := httputils.ParseForm(r); err != nil {
 			return err
 		}
-		switch container.WaitCondition(r.Form.Get("condition")) {
-		case container.WaitConditionNextExit:
-			waitCondition = containerpkg.WaitConditionNextExit
-		case container.WaitConditionRemoved:
-			waitCondition = containerpkg.WaitConditionRemoved
-			legacyRemovalWaitPre134 = versions.LessThan(version, "1.34")
+		if v := r.Form.Get("condition"); v != "" {
+			switch container.WaitCondition(v) {
+			case container.WaitConditionNextExit:
+				waitCondition = containerpkg.WaitConditionNextExit
+			case container.WaitConditionRemoved:
+				waitCondition = containerpkg.WaitConditionRemoved
+				legacyRemovalWaitPre134 = versions.LessThan(version, "1.34")
+			default:
+				return errdefs.InvalidParameter(errors.Errorf("invalid condition: %q", v))
+			}
 		}
 	}
 
@@ -422,19 +427,20 @@ func (s *containerRouter) postContainerUpdate(ctx context.Context, w http.Respon
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
-	if err := httputils.CheckForJSON(r); err != nil {
-		return err
-	}
 
 	var updateConfig container.UpdateConfig
-
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&updateConfig); err != nil {
+	if err := httputils.ReadJSON(r, &updateConfig); err != nil {
 		return err
 	}
 	if versions.LessThan(httputils.VersionFromContext(ctx), "1.40") {
 		updateConfig.PidsLimit = nil
 	}
+
+	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.42") {
+		// Ignore KernelMemory removed in API 1.42.
+		updateConfig.KernelMemory = 0
+	}
+
 	if updateConfig.PidsLimit != nil && *updateConfig.PidsLimit <= 0 {
 		// Both `0` and `-1` are accepted to set "unlimited" when updating.
 		// Historically, any negative value was accepted, so treat them as
@@ -499,6 +505,11 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		if hostConfig.CgroupnsMode.IsEmpty() {
 			hostConfig.CgroupnsMode = container.CgroupnsModeHost
 		}
+	}
+
+	if hostConfig != nil && versions.GreaterThanOrEqualTo(version, "1.42") {
+		// Ignore KernelMemory removed in API 1.42.
+		hostConfig.KernelMemory = 0
 	}
 
 	var platform *specs.Platform
@@ -626,7 +637,7 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 		// Remember to close stream if error happens
 		conn, _, errHijack := hijacker.Hijack()
 		if errHijack == nil {
-			statusCode := errdefs.GetHTTPErrorStatusCode(err)
+			statusCode := httpstatus.FromError(err)
 			statusText := http.StatusText(statusCode)
 			fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n%s\r\n", statusCode, statusText, err.Error())
 			httputils.CloseStreams(conn)
@@ -706,7 +717,7 @@ func (s *containerRouter) postContainersPrune(ctx context.Context, w http.Respon
 
 	pruneFilters, err := filters.FromJSON(r.Form.Get("filters"))
 	if err != nil {
-		return errdefs.InvalidParameter(err)
+		return err
 	}
 
 	pruneReport, err := s.backend.ContainersPrune(ctx, pruneFilters)

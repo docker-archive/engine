@@ -18,7 +18,7 @@ import (
 	refstore "github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
 	"github.com/docker/libtrust"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
@@ -56,7 +56,7 @@ type ImagePullConfig struct {
 	Config
 
 	// DownloadManager manages concurrent pulls.
-	DownloadManager RootFSDownloadManager
+	DownloadManager *xfer.LayerDownloadManager
 	// Schema2Types is the valid schema2 configuration types allowed
 	// by the pull operation.
 	Schema2Types []string
@@ -102,18 +102,9 @@ type PushLayer interface {
 	DiffID() layer.DiffID
 	Parent() PushLayer
 	Open() (io.ReadCloser, error)
-	Size() (int64, error)
+	Size() int64
 	MediaType() string
 	Release()
-}
-
-// RootFSDownloadManager handles downloading of the rootfs
-type RootFSDownloadManager interface {
-	// Download downloads the layers into the given initial rootfs and
-	// returns the final rootfs.
-	// Given progress output to track download progress
-	// Returns function to release download resources
-	Download(ctx context.Context, initialRootFS image.RootFS, os string, layers []xfer.DownloadDescriptor, progressOutput progress.Output) (image.RootFS, func(), error)
 }
 
 type imageConfigStore struct {
@@ -229,7 +220,7 @@ func (l *storeLayer) Open() (io.ReadCloser, error) {
 	return l.Layer.TarStream()
 }
 
-func (l *storeLayer) Size() (int64, error) {
+func (l *storeLayer) Size() int64 {
 	return l.Layer.DiffSize()
 }
 

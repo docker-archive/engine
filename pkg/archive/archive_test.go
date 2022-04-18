@@ -791,7 +791,7 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		expectedGID int
 	}{
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1337, GID: 42}}, 1337, 42},
-		{&TarOptions{ChownOpts: &idtools.Identity{UID: 100001, GID: 100001}, UIDMaps: idMaps, GIDMaps: idMaps}, 100001, 100001},
+		{&TarOptions{ChownOpts: &idtools.Identity{UID: 100001, GID: 100001}, IDMap: idtools.IdentityMapping{UIDMaps: idMaps, GIDMaps: idMaps}}, 100001, 100001},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 0, GID: 0}, NoLchown: false}, 0, 0},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1, GID: 1}, NoLchown: true}, 1, 1},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1000, GID: 1000}, NoLchown: true}, 1000, 1000},
@@ -1401,4 +1401,13 @@ func TestPigz(t *testing.T) {
 		t.Log("Tested whether Pigz is not used, as it not installed")
 		assert.Equal(t, reflect.TypeOf(contextReaderCloserWrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
 	}
+}
+
+func TestNosysFileInfo(t *testing.T) {
+	st, err := os.Stat("archive_test.go")
+	assert.NilError(t, err)
+	h, err := tar.FileInfoHeader(nosysFileInfo{st}, "")
+	assert.NilError(t, err)
+	assert.Check(t, h.Uname == "")
+	assert.Check(t, h.Gname == "")
 }

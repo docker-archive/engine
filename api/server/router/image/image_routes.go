@@ -16,7 +16,6 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/streamformatter"
-	"github.com/docker/docker/registry"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
@@ -29,13 +28,13 @@ func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrite
 	}
 
 	var (
-		image    = r.Form.Get("fromImage")
-		repo     = r.Form.Get("repo")
-		tag      = r.Form.Get("tag")
-		message  = r.Form.Get("message")
-		err      error
-		output   = ioutils.NewWriteFlusher(w)
-		platform *specs.Platform
+		image       = r.Form.Get("fromImage")
+		repo        = r.Form.Get("repo")
+		tag         = r.Form.Get("tag")
+		message     = r.Form.Get("message")
+		progressErr error
+		output      = ioutils.NewWriteFlusher(w)
+		platform    *specs.Platform
 	)
 	defer output.Close()
 
@@ -43,9 +42,8 @@ func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrite
 
 	version := httputils.VersionFromContext(ctx)
 	if versions.GreaterThanOrEqualTo(version, "1.32") {
-		apiPlatform := r.FormValue("platform")
-		if apiPlatform != "" {
-			sp, err := platforms.Parse(apiPlatform)
+		if p := r.FormValue("platform"); p != "" {
+			sp, err := platforms.Parse(p)
 			if err != nil {
 				return err
 			}
@@ -71,23 +69,16 @@ func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrite
 				authConfig = &types.AuthConfig{}
 			}
 		}
-		err = s.backend.PullImage(ctx, image, tag, platform, metaHeaders, authConfig, output)
+		progressErr = s.backend.PullImage(ctx, image, tag, platform, metaHeaders, authConfig, output)
 	} else { // import
 		src := r.Form.Get("fromSrc")
-		// 'err' MUST NOT be defined within this block, we need any error
-		// generated from the download to be available to the output
-		// stream processing below
-		os := ""
-		if platform != nil {
-			os = platform.OS
-		}
-		err = s.backend.ImportImage(src, repo, os, tag, message, r.Body, output, r.Form["changes"])
+		progressErr = s.backend.ImportImage(src, repo, platform, tag, message, r.Body, output, r.Form["changes"])
 	}
-	if err != nil {
+	if progressErr != nil {
 		if !output.Flushed() {
-			return err
+			return progressErr
 		}
-		_, _ = output.Write(streamformatter.FormatError(err))
+		_, _ = output.Write(streamformatter.FormatError(progressErr))
 	}
 
 	return nil
@@ -298,15 +289,21 @@ func (s *imageRouter) getImagesSearch(ctx context.Context, w http.ResponseWriter
 			headers[k] = v
 		}
 	}
-	limit := registry.DefaultSearchLimit
+
+	var limit int
 	if r.Form.Get("limit") != "" {
-		limitValue, err := strconv.Atoi(r.Form.Get("limit"))
-		if err != nil {
-			return err
+		var err error
+		limit, err = strconv.Atoi(r.Form.Get("limit"))
+		if err != nil || limit < 0 {
+			return errdefs.InvalidParameter(errors.Wrap(err, "invalid limit specified"))
 		}
-		limit = limitValue
 	}
-	query, err := s.backend.SearchRegistryForImages(ctx, r.Form.Get("filters"), r.Form.Get("term"), limit, config, headers)
+	searchFilters, err := filters.FromJSON(r.Form.Get("filters"))
+	if err != nil {
+		return err
+	}
+
+	query, err := s.backend.SearchRegistryForImages(ctx, searchFilters, r.Form.Get("term"), limit, config, headers)
 	if err != nil {
 		return err
 	}

@@ -203,7 +203,7 @@ func (s *DockerSuite) TestPsListContainersFilterStatus(c *testing.T) {
 	assert.Equal(c, RemoveOutputForExistingElements(containerOut, existingContainers), secondID)
 
 	result := cli.Docker(cli.Args("ps", "-a", "-q", "--filter=status=rubbish"), cli.WithTimeout(time.Second*60))
-	err := "Invalid filter 'status=rubbish'"
+	err := "invalid filter 'status=rubbish'"
 	if versions.LessThan(testEnv.DaemonAPIVersion(), "1.32") {
 		err = "Unrecognised filter value for status: rubbish"
 	}
@@ -540,7 +540,7 @@ func (s *DockerSuite) TestPsListContainersFilterCreated(c *testing.T) {
 	// filter containers by 'create' - note, no -a needed
 	out, _ = dockerCmd(c, "ps", "-q", "-f", "status=created")
 	containerOut := strings.TrimSpace(out)
-	assert.Assert(c, strings.HasPrefix(cID, containerOut))
+	assert.Assert(c, strings.Contains(containerOut, shortCID), "Should have seen '%s' in ps output:\n%s", shortCID, out)
 }
 
 // Test for GitHub issue #12595

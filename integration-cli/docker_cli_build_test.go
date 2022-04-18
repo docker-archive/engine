@@ -25,7 +25,7 @@ import (
 	"github.com/docker/docker/testutil/fakegit"
 	"github.com/docker/docker/testutil/fakestorage"
 	"github.com/moby/buildkit/frontend/dockerfile/command"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/icmd"
@@ -6073,7 +6073,7 @@ func (s *DockerSuite) TestBuildLineErrorOnBuild(c *testing.T) {
   ONBUILD
   `)).Assert(c, icmd.Expected{
 		ExitCode: 1,
-		Err:      "parse error line 2: ONBUILD requires at least one argument",
+		Err:      "parse error on line 2: ONBUILD requires at least one argument",
 	})
 }
 
@@ -6087,7 +6087,7 @@ func (s *DockerSuite) TestBuildLineErrorUnknownInstruction(c *testing.T) {
   ERROR
   `)).Assert(c, icmd.Expected{
 		ExitCode: 1,
-		Err:      "parse error line 3: unknown instruction: NOINSTRUCTION",
+		Err:      "parse error on line 3: unknown instruction: NOINSTRUCTION",
 	})
 }
 
@@ -6104,7 +6104,7 @@ func (s *DockerSuite) TestBuildLineErrorWithEmptyLines(c *testing.T) {
   CMD ["/bin/init"]
   `)).Assert(c, icmd.Expected{
 		ExitCode: 1,
-		Err:      "parse error line 6: unknown instruction: NOINSTRUCTION",
+		Err:      "parse error on line 6: unknown instruction: NOINSTRUCTION",
 	})
 }
 
@@ -6118,7 +6118,7 @@ func (s *DockerSuite) TestBuildLineErrorWithComments(c *testing.T) {
   NOINSTRUCTION echo ba
   `)).Assert(c, icmd.Expected{
 		ExitCode: 1,
-		Err:      "parse error line 5: unknown instruction: NOINSTRUCTION",
+		Err:      "parse error on line 5: unknown instruction: NOINSTRUCTION",
 	})
 }
 

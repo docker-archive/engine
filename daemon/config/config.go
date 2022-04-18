@@ -7,14 +7,11 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 
-	daemondiscovery "github.com/docker/docker/daemon/discovery"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/authorization"
-	"github.com/docker/docker/pkg/discovery"
 	"github.com/docker/docker/registry"
 	"github.com/imdario/mergo"
 	"github.com/pkg/errors"
@@ -35,17 +32,14 @@ const (
 	// maximum number of attempts that
 	// may take place at a time for each pull when the connection is lost.
 	DefaultDownloadAttempts = 5
-	// DefaultShmSize is the default value for container's shm size
-	DefaultShmSize = int64(67108864)
+	// DefaultShmSize is the default value for container's shm size (64 MiB)
+	DefaultShmSize int64 = 64 * 1024 * 1024
 	// DefaultNetworkMtu is the default value for network MTU
 	DefaultNetworkMtu = 1500
 	// DisableNetworkBridge is the default value of the option to disable network bridge
 	DisableNetworkBridge = "none"
 	// DefaultInitBinary is the name of the default init binary
 	DefaultInitBinary = "docker-init"
-	// DefaultShimBinary is the default shim to be used by containerd if none
-	// is specified
-	DefaultShimBinary = "containerd-shim"
 	// DefaultRuntimeBinary is the default runtime to be used by
 	// containerd if none is specified
 	DefaultRuntimeBinary = "runc"
@@ -166,7 +160,9 @@ type CommonConfig struct {
 	ExecRoot              string                    `json:"exec-root,omitempty"`
 	SocketGroup           string                    `json:"group,omitempty"`
 	CorsHeaders           string                    `json:"api-cors-header,omitempty"`
-	ProxyConfig
+
+	// Proxies holds the proxies that are configured for the daemon.
+	Proxies `json:"proxies"`
 
 	// TrustKeyPath is used to generate the daemon ID and for signing schema 1 manifests
 	// when pushing to a registry which does not support schema 2. This field is marked as
@@ -277,8 +273,8 @@ type CommonConfig struct {
 	DefaultRuntime string `json:"default-runtime,omitempty"`
 }
 
-// ProxyConfig holds the proxy-configuration for the daemon.
-type ProxyConfig struct {
+// Proxies holds the proxies that are configured for the daemon.
+type Proxies struct {
 	HTTPProxy  string `json:"http-proxy,omitempty"`
 	HTTPSProxy string `json:"https-proxy,omitempty"`
 	NoProxy    string `json:"no-proxy,omitempty"`
@@ -301,25 +297,8 @@ func New() *Config {
 			LogConfig: LogConfig{
 				Config: make(map[string]string),
 			},
-			ClusterOpts: make(map[string]string),
 		},
 	}
-}
-
-// ParseClusterAdvertiseSettings parses the specified advertise settings
-func ParseClusterAdvertiseSettings(clusterStore, clusterAdvertise string) (string, error) {
-	if clusterAdvertise == "" {
-		return "", daemondiscovery.ErrDiscoveryDisabled
-	}
-	if clusterStore == "" {
-		return "", errors.New("invalid cluster configuration. --cluster-advertise must be accompanied by --cluster-store configuration")
-	}
-
-	advertise, err := discovery.ParseAdvertise(clusterAdvertise)
-	if err != nil {
-		return "", errors.Wrap(err, "discovery advertise parsing failed")
-	}
-	return advertise, nil
 }
 
 // GetConflictFreeLabels validates Labels for conflict
@@ -624,6 +603,12 @@ func Validate(config *Config) error {
 		}
 	}
 
+	for _, h := range config.Hosts {
+		if _, err := opts.ValidateHost(h); err != nil {
+			return err
+		}
+	}
+
 	// validate platform-specific settings
 	return config.ValidatePlatformConfig()
 }
@@ -634,21 +619,6 @@ func ValidateMaxDownloadAttempts(config *Config) error {
 		return fmt.Errorf("invalid max download attempts: %d", *config.MaxDownloadAttempts)
 	}
 	return nil
-}
-
-// ModifiedDiscoverySettings returns whether the discovery configuration has been modified or not.
-func ModifiedDiscoverySettings(config *Config, backendType, advertise string, clusterOpts map[string]string) bool {
-	if config.ClusterStore != backendType || config.ClusterAdvertise != advertise {
-		return true
-	}
-
-	if (config.ClusterOpts == nil && clusterOpts == nil) ||
-		(config.ClusterOpts == nil && len(clusterOpts) == 0) ||
-		(len(config.ClusterOpts) == 0 && clusterOpts == nil) {
-		return false
-	}
-
-	return !reflect.DeepEqual(config.ClusterOpts, clusterOpts)
 }
 
 // GetDefaultRuntimeName returns the current default runtime

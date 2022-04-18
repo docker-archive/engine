@@ -81,9 +81,7 @@ func inspectFieldAndUnmarshall(c *testing.T, name, field string, output interfac
 	c.Helper()
 	str := inspectFieldJSON(c, name, field)
 	err := json.Unmarshal([]byte(str), output)
-	if c != nil {
-		assert.Assert(c, err == nil, "failed to unmarshal: %v", err)
-	}
+	assert.Assert(c, err == nil, "failed to unmarshal: %v", err)
 }
 
 // Deprecated: use cli.Inspect
@@ -98,26 +96,22 @@ func inspectFilter(name, filter string) (string, error) {
 
 // Deprecated: use cli.Inspect
 func inspectFieldWithError(name, field string) (string, error) {
-	return inspectFilter(name, fmt.Sprintf(".%s", field))
+	return inspectFilter(name, "."+field)
 }
 
 // Deprecated: use cli.Inspect
 func inspectField(c *testing.T, name, field string) string {
 	c.Helper()
-	out, err := inspectFilter(name, fmt.Sprintf(".%s", field))
-	if c != nil {
-		assert.NilError(c, err)
-	}
+	out, err := inspectFilter(name, "."+field)
+	assert.NilError(c, err)
 	return out
 }
 
 // Deprecated: use cli.Inspect
 func inspectFieldJSON(c *testing.T, name, field string) string {
 	c.Helper()
-	out, err := inspectFilter(name, fmt.Sprintf("json .%s", field))
-	if c != nil {
-		assert.NilError(c, err)
-	}
+	out, err := inspectFilter(name, "json ."+field)
+	assert.NilError(c, err)
 	return out
 }
 
@@ -125,9 +119,7 @@ func inspectFieldJSON(c *testing.T, name, field string) string {
 func inspectFieldMap(c *testing.T, name, path, field string) string {
 	c.Helper()
 	out, err := inspectFilter(name, fmt.Sprintf("index .%s %q", path, field))
-	if c != nil {
-		assert.NilError(c, err)
-	}
+	assert.NilError(c, err)
 	return out
 }
 

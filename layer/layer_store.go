@@ -13,9 +13,8 @@ import (
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/docker/pkg/stringid"
-	"github.com/docker/docker/pkg/system"
 	"github.com/moby/locker"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 	"github.com/vbatts/tar-split/tar/asm"
 	"github.com/vbatts/tar-split/tar/storage"
@@ -41,8 +40,6 @@ type layerStore struct {
 
 	// protect *RWLayer() methods from operating on the same name/id
 	locker *locker.Locker
-
-	os string
 }
 
 // StoreOptions are the options used to create a new Store instance
@@ -51,10 +48,9 @@ type StoreOptions struct {
 	MetadataStorePathTemplate string
 	GraphDriver               string
 	GraphDriverOptions        []string
-	IDMapping                 *idtools.IdentityMapping
+	IDMapping                 idtools.IdentityMapping
 	PluginGetter              plugingetter.PluginGetter
 	ExperimentalEnabled       bool
-	OS                        string
 }
 
 // NewStoreFromOptions creates a new Store instance
@@ -62,8 +58,7 @@ func NewStoreFromOptions(options StoreOptions) (Store, error) {
 	driver, err := graphdriver.New(options.GraphDriver, options.PluginGetter, graphdriver.Options{
 		Root:                options.Root,
 		DriverOptions:       options.GraphDriverOptions,
-		UIDMaps:             options.IDMapping.UIDs(),
-		GIDMaps:             options.IDMapping.GIDs(),
+		IDMap:               options.IDMapping,
 		ExperimentalEnabled: options.ExperimentalEnabled,
 	})
 	if err != nil {
@@ -73,16 +68,13 @@ func NewStoreFromOptions(options StoreOptions) (Store, error) {
 
 	root := fmt.Sprintf(options.MetadataStorePathTemplate, driver)
 
-	return newStoreFromGraphDriver(root, driver, options.OS)
+	return newStoreFromGraphDriver(root, driver)
 }
 
 // newStoreFromGraphDriver creates a new Store instance using the provided
 // metadata store and graph driver. The metadata store will be used to restore
 // the Store.
-func newStoreFromGraphDriver(root string, driver graphdriver.Driver, os string) (Store, error) {
-	if !system.IsOSSupported(os) {
-		return nil, fmt.Errorf("failed to initialize layer store as operating system '%s' is not supported", os)
-	}
+func newStoreFromGraphDriver(root string, driver graphdriver.Driver) (Store, error) {
 	caps := graphdriver.Capabilities{}
 	if capDriver, ok := driver.(graphdriver.CapabilityDriver); ok {
 		caps = capDriver.Capabilities()
@@ -100,7 +92,6 @@ func newStoreFromGraphDriver(root string, driver graphdriver.Driver, os string) 
 		mounts:      map[string]*mountedLayer{},
 		locker:      locker.New(),
 		useTarSplit: !caps.ReproducesExactDiffs,
-		os:          os,
 	}
 
 	ids, mounts, err := ms.List()
@@ -161,15 +152,6 @@ func (ls *layerStore) loadLayer(layer ChainID) (*roLayer, error) {
 	descriptor, err := ls.store.GetDescriptor(layer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get descriptor for %s: %s", layer, err)
-	}
-
-	os, err := ls.store.getOS(layer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get operating system for %s: %s", layer, err)
-	}
-
-	if os != ls.os {
-		return nil, fmt.Errorf("failed to load layer with os %s into layerstore for %s", os, ls.os)
 	}
 
 	cl = &roLayer{
@@ -291,7 +273,9 @@ func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, descr
 	var p *roLayer
 
 	if string(parent) != "" {
+		ls.layerL.Lock()
 		p = ls.get(parent)
+		ls.layerL.Unlock()
 		if p == nil {
 			return nil, ErrLayerDoesNotExist
 		}
@@ -358,7 +342,7 @@ func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, descr
 	ls.layerL.Lock()
 	defer ls.layerL.Unlock()
 
-	if existingLayer := ls.getWithoutLock(layer.chainID); existingLayer != nil {
+	if existingLayer := ls.get(layer.chainID); existingLayer != nil {
 		// Set error for cleanup, but do not return the error
 		err = errors.New("layer already exists")
 		return existingLayer.getReference(), nil
@@ -373,28 +357,20 @@ func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, descr
 	return layer.getReference(), nil
 }
 
-func (ls *layerStore) getWithoutLock(layer ChainID) *roLayer {
+func (ls *layerStore) get(layer ChainID) *roLayer {
 	l, ok := ls.layerMap[layer]
 	if !ok {
 		return nil
 	}
-
 	l.referenceCount++
-
 	return l
-}
-
-func (ls *layerStore) get(l ChainID) *roLayer {
-	ls.layerL.Lock()
-	defer ls.layerL.Unlock()
-	return ls.getWithoutLock(l)
 }
 
 func (ls *layerStore) Get(l ChainID) (Layer, error) {
 	ls.layerL.Lock()
 	defer ls.layerL.Unlock()
 
-	layer := ls.getWithoutLock(l)
+	layer := ls.get(l)
 	if layer == nil {
 		return nil, ErrLayerDoesNotExist
 	}
@@ -439,7 +415,7 @@ func (ls *layerStore) deleteLayer(layer *roLayer, metadata *Metadata) error {
 	}
 	metadata.DiffID = layer.diffID
 	metadata.ChainID = layer.chainID
-	metadata.Size, err = layer.Size()
+	metadata.Size = layer.Size()
 	if err != nil {
 		return err
 	}
@@ -527,7 +503,9 @@ func (ls *layerStore) CreateRWLayer(name string, parent ChainID, opts *CreateRWL
 	var pid string
 	var p *roLayer
 	if string(parent) != "" {
+		ls.layerL.Lock()
 		p = ls.get(parent)
+		ls.layerL.Unlock()
 		if p == nil {
 			return nil, ErrLayerDoesNotExist
 		}

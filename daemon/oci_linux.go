@@ -17,7 +17,7 @@ import (
 	"github.com/containerd/containerd/pkg/userns"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	daemonconfig "github.com/docker/docker/daemon/config"
+	dconfig "github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/oci"
 	"github.com/docker/docker/oci/caps"
 	"github.com/docker/docker/pkg/idtools"
@@ -27,7 +27,6 @@ import (
 	"github.com/moby/sys/mount"
 	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/opencontainers/runc/libcontainer/devices"
 	"github.com/opencontainers/runc/libcontainer/user"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -35,7 +34,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const inContainerInitPath = "/sbin/" + daemonconfig.DefaultInitBinary
+const inContainerInitPath = "/sbin/" + dconfig.DefaultInitBinary
 
 // WithRlimits sets the container's rlimits along with merging the daemon's rlimits
 func WithRlimits(daemon *Daemon, c *container.Container) coci.SpecOpts {
@@ -228,13 +227,13 @@ func WithNamespaces(daemon *Daemon, c *container.Container) coci.SpecOpts {
 		userNS := false
 		// user
 		if c.HostConfig.UsernsMode.IsPrivate() {
-			uidMap := daemon.idMapping.UIDs()
+			uidMap := daemon.idMapping.UIDMaps
 			if uidMap != nil {
 				userNS = true
 				ns := specs.LinuxNamespace{Type: "user"}
 				setNamespace(s, ns)
 				s.Linux.UIDMappings = specMapping(uidMap)
-				s.Linux.GIDMappings = specMapping(daemon.idMapping.GIDs())
+				s.Linux.GIDMappings = specMapping(daemon.idMapping.GIDMaps)
 			}
 		}
 		// network
@@ -690,7 +689,7 @@ func WithMounts(daemon *Daemon, c *container.Container) coci.SpecOpts {
 
 		// TODO: until a kernel/mount solution exists for handling remount in a user namespace,
 		// we must clear the readonly flag for the cgroups mount (@mrunalp concurs)
-		if uidMap := daemon.idMapping.UIDs(); uidMap != nil || c.HostConfig.Privileged {
+		if uidMap := daemon.idMapping.UIDMaps; uidMap != nil || c.HostConfig.Privileged {
 			for i, m := range s.Mounts {
 				if m.Type == "cgroup" {
 					clearReadOnly(&s.Mounts[i])
@@ -743,7 +742,7 @@ func WithCommonOptions(daemon *Daemon, c *container.Container) coci.SpecOpts {
 				s.Process.Args = append([]string{inContainerInitPath, "--", c.Path}, c.Args...)
 				path := daemon.configStore.InitPath
 				if path == "" {
-					path, err = exec.LookPath(daemonconfig.DefaultInitBinary)
+					path, err = exec.LookPath(dconfig.DefaultInitBinary)
 					if err != nil {
 						return err
 					}
@@ -819,16 +818,6 @@ func WithCgroups(daemon *Daemon, c *container.Container) coci.SpecOpts {
 			return nil
 		}
 
-		if cdcgroups.Mode() == cdcgroups.Unified {
-			return errors.New("daemon-scoped cpu-rt-period and cpu-rt-runtime are not implemented for cgroup v2")
-		}
-
-		// FIXME this is very expensive way to check if cpu rt is supported
-		sysInfo := daemon.RawSysInfo()
-		if !sysInfo.CPURealtime {
-			return errors.New("daemon-scoped cpu-rt-period and cpu-rt-runtime are not supported by the kernel")
-		}
-
 		p := cgroupsPath
 		if useSystemd {
 			initPath, err := cgroups.GetInitCgroup("cpu")
@@ -873,14 +862,12 @@ func WithDevices(daemon *Daemon, c *container.Container) coci.SpecOpts {
 		var devs []specs.LinuxDevice
 		devPermissions := s.Linux.Resources.Devices
 
-		if c.HostConfig.Privileged && !userns.RunningInUserNS() {
-			hostDevices, err := devices.HostDevices()
+		if c.HostConfig.Privileged {
+			hostDevices, err := coci.HostDevices()
 			if err != nil {
 				return err
 			}
-			for _, d := range hostDevices {
-				devs = append(devs, oci.Device(d))
-			}
+			devs = append(devs, hostDevices...)
 
 			// adding device mappings in privileged containers
 			for _, deviceMapping := range c.HostConfig.Devices {

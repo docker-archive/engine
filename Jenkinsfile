@@ -16,7 +16,6 @@ pipeline {
         booleanParam(name: 'arm64', defaultValue: true, description: 'ARM (arm64) Build/Test')
         booleanParam(name: 's390x', defaultValue: false, description: 'IBM Z (s390x) Build/Test')
         booleanParam(name: 'ppc64le', defaultValue: false, description: 'PowerPC (ppc64le) Build/Test')
-        booleanParam(name: 'windowsRS1', defaultValue: false, description: 'Windows 2016 (RS1) Build/Test')
         booleanParam(name: 'windowsRS5', defaultValue: true, description: 'Windows 2019 (RS5) Build/Test')
         booleanParam(name: 'windows2022', defaultValue: true, description: 'Windows 2022 (LTSC) Build/Test')
         booleanParam(name: 'windows2022containerd', defaultValue: true, description: 'Windows 2022 (LTSC) with containerd Build/Test')
@@ -55,7 +54,7 @@ pipeline {
                   -v "$WORKSPACE:/workspace" \
                   -e VALIDATE_REPO=${GIT_URL} \
                   -e VALIDATE_BRANCH=${CHANGE_TARGET} \
-                  alpine sh -c 'apk add --no-cache -q bash git openssh-client && cd /workspace && hack/validate/dco'
+                  alpine sh -c 'apk add --no-cache -q bash git openssh-client && git config --system --add safe.directory /workspace && cd /workspace && hack/validate/dco'
                 '''
             }
         }
@@ -664,8 +663,11 @@ pipeline {
                 stage('s390x integration-cli') {
                     when {
                         beforeAgent true
-                        not { changeRequest() }
-                        expression { params.s390x }
+                        // Skip this stage on PRs unless the checkbox is selected
+                        anyOf {
+                            not { changeRequest() }
+                            expression { params.s390x }
+                        }
                     }
                     agent { label 's390x-ubuntu-2004' }
 
@@ -866,8 +868,11 @@ pipeline {
                 stage('ppc64le integration-cli') {
                     when {
                         beforeAgent true
-                        not { changeRequest() }
-                        expression { params.ppc64le }
+                        // Skip this stage on PRs unless the checkbox is selected
+                        anyOf {
+                            not { changeRequest() }
+                            expression { params.ppc64le }
+                        }
                     }
                     agent { label 'ppc64le-ubuntu-1604' }
                     // ppc64le machines run on Docker 18.06, and buildkit has some
@@ -1054,73 +1059,6 @@ pipeline {
                                 '''
 
                                 archiveArtifacts artifacts: '*-bundles.tar.gz', allowEmptyArchive: true
-                            }
-                        }
-                        cleanup {
-                            sh 'make clean'
-                            deleteDir()
-                        }
-                    }
-                }
-                stage('win-RS1') {
-                    when {
-                        beforeAgent true
-                        // Skip this stage on PRs unless the windowsRS1 checkbox is selected
-                        anyOf {
-                            not { changeRequest() }
-                            expression { params.windowsRS1 }
-                        }
-                    }
-                    environment {
-                        DOCKER_BUILDKIT        = '0'
-                        DOCKER_DUT_DEBUG       = '1'
-                        SKIP_VALIDATION_TESTS  = '1'
-                        SOURCES_DRIVE          = 'd'
-                        SOURCES_SUBDIR         = 'gopath'
-                        TESTRUN_DRIVE          = 'd'
-                        TESTRUN_SUBDIR         = "CI"
-                        WINDOWS_BASE_IMAGE     = 'mcr.microsoft.com/windows/servercore'
-                        WINDOWS_BASE_IMAGE_TAG = 'ltsc2016'
-                    }
-                    agent {
-                        node {
-                            customWorkspace 'd:\\gopath\\src\\github.com\\docker\\docker'
-                            label 'windows-2016'
-                        }
-                    }
-                    stages {
-                        stage("Print info") {
-                            steps {
-                                sh 'docker version'
-                                sh 'docker info'
-                            }
-                        }
-                        stage("Run tests") {
-                            steps {
-                                powershell '''
-                                $ErrorActionPreference = 'Stop'
-                                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                                Invoke-WebRequest https://github.com/moby/docker-ci-zap/blob/master/docker-ci-zap.exe?raw=true -OutFile C:/Windows/System32/docker-ci-zap.exe
-                                ./hack/ci/windows.ps1
-                                exit $LastExitCode
-                                '''
-                            }
-                        }
-                    }
-                    post {
-                        always {
-                            junit testResults: 'bundles/junit-report-*.xml', allowEmptyResults: true
-                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE', message: 'Failed to create bundles.tar.gz') {
-                                powershell '''
-                                cd $env:WORKSPACE
-                                $bundleName="windowsRS1-integration"
-                                Write-Host -ForegroundColor Green "Creating ${bundleName}-bundles.zip"
-
-                                # archiveArtifacts does not support env-vars to , so save the artifacts in a fixed location
-                                Compress-Archive -Path "bundles/CIDUT.out", "bundles/CIDUT.err", "bundles/junit-report-*.xml" -CompressionLevel Optimal -DestinationPath "${bundleName}-bundles.zip"
-                                '''
-
-                                archiveArtifacts artifacts: '*-bundles.zip', allowEmptyArchive: true
                             }
                         }
                         cleanup {
